@@ -4,10 +4,10 @@ import OSLog
 @Observable
 final class ConnectionManager {
     var config: AppConfig = AppConfig.defaultConfig
-    var statuses: [UUID: ConnectionStatus] = [:]
+    var statuses: [String: ConnectionStatus] = [:]
 
-    private var processes: [UUID: Process] = [:]
-    private var errorPipes: [UUID: Pipe] = [:]
+    private var processes: [String: Process] = [:]
+    private var errorPipes: [String: Pipe] = [:]
     private let logger = Logger(subsystem: "net.jwra.PortLight", category: "ConnectionManager")
     private let configManager: ConfigManager
 
