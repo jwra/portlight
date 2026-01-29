@@ -159,8 +159,9 @@ final class ConfigManager {
     // MARK: - Validation
 
     private func revalidate() {
-        lastValidationResult = validate()
-        logValidationIssues(lastValidationResult!)
+        let result = validate()
+        lastValidationResult = result
+        logValidationIssues(result)
     }
 
     func validate() -> ConfigValidationResult {
@@ -214,8 +215,9 @@ final class ConfigManager {
     /// Returns an AppConfig for compatibility with existing ConnectionManager code
     func loadConfig() -> AppConfig {
         let config = AppConfig(binaryPath: binaryPath, connections: connections)
-        lastValidationResult = config.validate()
-        logValidationIssues(lastValidationResult!)
+        let result = config.validate()
+        lastValidationResult = result
+        logValidationIssues(result)
         return config
     }
 
