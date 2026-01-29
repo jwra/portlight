@@ -403,11 +403,22 @@ final class ConnectionManager {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             guard let self else { return }
 
+            // Check if connection still exists before processing.
+            // This prevents race condition with handleProcessTermination cleanup,
+            // which removes errorPipes[connectionId] when the process terminates.
+            let pipeStillValid = self.stateQueue.sync {
+                self.errorPipes[connectionId] != nil
+            }
+            guard pipeStillValid else { return }
+
             let data = handle.availableData
             guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
 
-            // Buffer all stderr output for later use in termination handler
+            // Buffer all stderr output for later use in termination handler.
+            // Double-check pipe validity inside the lock since termination could
+            // have started cleanup between the first check and this write.
             self.stateQueue.sync {
+                guard self.errorPipes[connectionId] != nil else { return }
                 self.stderrBuffers[connectionId, default: ""] += output
             }
 
