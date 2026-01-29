@@ -10,7 +10,6 @@ final class ConfigManager {
     // UserDefaults keys
     private let connectionsKey = "connections"
     private let binaryPathKey = "binaryPath"
-    private let migratedKey = "migratedFromJSON"
 
     static let defaultBinaryPath = "/usr/local/bin/cloud-sql-proxy"
 
@@ -59,66 +58,10 @@ final class ConfigManager {
         }
     }
 
-    // MARK: - Legacy Config Path (for migration)
-
-    private var legacyConfigURL: URL {
-        legacyConfigDirectoryURL.appendingPathComponent("config.json")
-    }
-
-    private var legacyConfigDirectoryURL: URL {
-        if let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            return appSupport.appendingPathComponent("PortLight")
-        }
-        let homeDir = fileManager.homeDirectoryForCurrentUser
-        return homeDir.appendingPathComponent(".portlight")
-    }
-
     // MARK: - Initialization
 
     init() {
-        migrateFromJSONIfNeeded()
         revalidate()
-    }
-
-    // MARK: - Migration
-
-    private func migrateFromJSONIfNeeded() {
-        // Check if already migrated
-        guard !UserDefaults.standard.bool(forKey: migratedKey) else { return }
-
-        // Check if legacy config exists
-        guard fileManager.fileExists(atPath: legacyConfigURL.path) else {
-            // No legacy config, mark as migrated so we don't check again
-            UserDefaults.standard.set(true, forKey: migratedKey)
-            logger.info("No legacy config found, skipping migration")
-            return
-        }
-
-        do {
-            let data = try Data(contentsOf: legacyConfigURL)
-            let legacyConfig = try JSONDecoder().decode(AppConfig.self, from: data)
-
-            // Migrate connections
-            connections = legacyConfig.connections
-
-            // Migrate binary path (only if different from default)
-            if legacyConfig.binaryPath != Self.defaultBinaryPath {
-                binaryPath = legacyConfig.binaryPath
-            }
-
-            // Mark as migrated
-            UserDefaults.standard.set(true, forKey: migratedKey)
-            logger.info("Successfully migrated \(legacyConfig.connections.count) connections from JSON config")
-
-            // Rename the old config file to indicate it's been migrated
-            let backupURL = legacyConfigDirectoryURL.appendingPathComponent("config.json.migrated")
-            try? fileManager.moveItem(at: legacyConfigURL, to: backupURL)
-
-        } catch {
-            logger.error("Failed to migrate from JSON config: \(error.localizedDescription)")
-            // Do NOT mark as migrated on failure - allow retry on next launch
-            // User's legacy config data will be preserved and migration can be retried
-        }
     }
 
     // MARK: - CRUD Operations
