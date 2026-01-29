@@ -6,15 +6,24 @@ import OSLog
 final class ConfigManager {
     private let logger = Logger(subsystem: "net.jwra.PortLight", category: "Config")
     private let fileManager = FileManager.default
+    private var didLogFallback = false
 
     var configURL: URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let portlightDir = appSupport.appendingPathComponent("PortLight")
-        return portlightDir.appendingPathComponent("config.json")
+        configDirectoryURL.appendingPathComponent("config.json")
     }
 
     var configDirectoryURL: URL {
-        configURL.deletingLastPathComponent()
+        if let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
+            return appSupport.appendingPathComponent("PortLight")
+        }
+
+        // Fallback to home directory if Application Support unavailable
+        if !didLogFallback {
+            logger.warning("Application Support directory unavailable, using fallback location")
+            didLogFallback = true
+        }
+        let homeDir = fileManager.homeDirectoryForCurrentUser
+        return homeDir.appendingPathComponent(".portlight")
     }
 
     func loadConfig() -> AppConfig {
