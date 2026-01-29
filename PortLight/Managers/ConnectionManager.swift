@@ -79,7 +79,7 @@ final class ConnectionManager {
                     processesToTerminate.append((id: id, process: process))
                 }
             }
-            statuses.removeValue(forKey: id)
+            removeStatus(for: id)
         }
 
         // Handle modified connections
@@ -93,12 +93,12 @@ final class ConnectionManager {
                             processesToTerminate.append((id: id, process: process))
                         }
                     }
-                    statuses[id] = .disconnected
+                    setStatus(.disconnected, for: id)
                 }
                 // Name or autoConnect changed - just let config update handle it
             } else {
                 // New connection
-                statuses[id] = .disconnected
+                setStatus(.disconnected, for: id)
             }
         }
 
@@ -261,8 +261,10 @@ final class ConnectionManager {
         }
 
         // Set all statuses to disconnected immediately for responsive UI
-        for key in statuses.keys {
-            statuses[key] = .disconnected
+        // Collect keys first to avoid mutating during iteration
+        let connectionIds = Array(statuses.keys)
+        for connectionId in connectionIds {
+            setStatus(.disconnected, for: connectionId)
         }
 
         // Terminate all processes
@@ -292,13 +294,15 @@ final class ConnectionManager {
         let currentIds = Set(config.connections.map { $0.id })
 
         // Remove statuses for connections no longer in config
-        for key in statuses.keys where !currentIds.contains(key) {
-            statuses.removeValue(forKey: key)
+        // Collect keys first to avoid mutating during iteration
+        let keysToRemove = statuses.keys.filter { !currentIds.contains($0) }
+        for key in keysToRemove {
+            removeStatus(for: key)
         }
 
         // Add statuses for new connections
         for connection in config.connections where statuses[connection.id] == nil {
-            statuses[connection.id] = .disconnected
+            setStatus(.disconnected, for: connection.id)
         }
     }
 
@@ -312,14 +316,34 @@ final class ConnectionManager {
         }
     }
 
+    /// Sets the connection status, ensuring thread-safe access to the `statuses` dictionary.
+    /// This method can be called from any thread - it will dispatch to main if needed.
+    /// All status mutations MUST go through this method to prevent race conditions.
     private func setStatus(_ status: ConnectionStatus, for connectionId: String) {
-        DispatchQueue.main.async {
-            self.statuses[connectionId] = status
+        if Thread.isMainThread {
+            statuses[connectionId] = status
 
             // Track the most recent error
             if case .error(let message) = status {
-                let connectionName = self.config.connections.first { $0.id == connectionId }?.name ?? connectionId
-                self.lastError = (connectionName: connectionName, message: message)
+                let connectionName = config.connections.first { $0.id == connectionId }?.name ?? connectionId
+                lastError = (connectionName: connectionName, message: message)
+            }
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.setStatus(status, for: connectionId)
+            }
+        }
+    }
+
+    /// Removes the status for a connection, ensuring thread-safe access to the `statuses` dictionary.
+    /// This method can be called from any thread - it will dispatch to main if needed.
+    /// All status removals MUST go through this method to prevent race conditions.
+    private func removeStatus(for connectionId: String) {
+        if Thread.isMainThread {
+            statuses.removeValue(forKey: connectionId)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.removeStatus(for: connectionId)
             }
         }
     }
