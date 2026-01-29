@@ -23,6 +23,8 @@ final class ConnectionManager {
     private let connectionTimeoutSeconds: TimeInterval = 30
     /// Interval between port availability checks (seconds)
     private let pollIntervalSeconds: TimeInterval = 0.1
+    /// Timeout for graceful termination before sending SIGKILL (seconds)
+    private let terminationTimeoutSeconds: TimeInterval = 5.0
 
     var hasActiveConnections: Bool {
         statuses.values.contains { $0.isActive }
@@ -223,28 +225,48 @@ final class ConnectionManager {
             return
         }
 
-        // Terminate the process
+        // Terminate the process with SIGKILL fallback if needed
+        terminateProcess(process, connectionId: connectionId, isManualDisconnect: true)
+    }
+
+    /// Terminates a process gracefully with SIGTERM, then SIGKILL if it doesn't exit within timeout.
+    /// - Parameters:
+    ///   - process: The process to terminate
+    ///   - connectionId: The connection ID for cleanup
+    ///   - isManualDisconnect: Whether this is a user-initiated disconnect (affects final status)
+    private func terminateProcess(_ process: Process, connectionId: String, isManualDisconnect: Bool) {
         process.terminate()
 
-        // Wait for exit on background thread to avoid blocking main thread
+        // Wait for exit on background thread with timeout
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            process.waitUntilExit()
+            guard let self else { return }
 
-            self?.stateQueue.sync {
-                self?.processes.removeValue(forKey: connectionId)
-                self?.cleanupPipeUnsafe(for: connectionId)
+            let pid = process.processIdentifier
+            let semaphore = DispatchSemaphore(value: 0)
+
+            // Start waiting for exit in another thread
+            DispatchQueue.global(qos: .utility).async {
+                process.waitUntilExit()
+                semaphore.signal()
             }
 
-            DispatchQueue.main.async {
-                guard let self else {
-                    Logger(subsystem: "net.jwra.PortLight", category: "ConnectionManager")
-                        .warning("Self deallocated during disconnect for \(connectionId)")
-                    return
-                }
-                // Only set to disconnected if not already in error state from termination handler
-                if case .error = self.statuses[connectionId] {
-                    // Keep error state
-                } else {
+            // Wait with timeout
+            let result = semaphore.wait(timeout: .now() + self.terminationTimeoutSeconds)
+            if result == .timedOut {
+                self.logger.warning("Process \(pid) did not exit gracefully within \(Int(self.terminationTimeoutSeconds))s, sending SIGKILL")
+                kill(pid, SIGKILL)
+                process.waitUntilExit()
+            }
+
+            self.stateQueue.sync {
+                self.processes.removeValue(forKey: connectionId)
+                self.cleanupPipeUnsafe(for: connectionId)
+            }
+
+            if isManualDisconnect {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    // For manual disconnect, always set to disconnected to clear any error state
                     self.setStatus(.disconnected, for: connectionId)
                 }
             }
@@ -252,35 +274,48 @@ final class ConnectionManager {
     }
 
     func disconnectAll() {
-        let allProcesses: [Process] = stateQueue.sync {
+        let allProcesses: [(id: String, process: Process)] = stateQueue.sync {
             for (id, _) in readinessChecks {
                 cancelReadinessCheckUnsafe(for: id)
             }
-            let procs = Array(processes.values)
-            return procs
+            return processes.map { ($0.key, $0.value) }
         }
 
         // Set all statuses to disconnected immediately for responsive UI
-        // Collect keys first to avoid mutating during iteration
         let connectionIds = Array(statuses.keys)
         for connectionId in connectionIds {
             setStatus(.disconnected, for: connectionId)
         }
 
         // Terminate all processes
-        for process in allProcesses {
+        for (_, process) in allProcesses {
             process.terminate()
         }
 
-        // Wait for exits on background thread to avoid blocking main thread
+        // Wait for exits on background thread with SIGKILL fallback
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            for process in allProcesses {
-                process.waitUntilExit()
+            guard let self else { return }
+
+            for (id, process) in allProcesses {
+                let pid = process.processIdentifier
+                let semaphore = DispatchSemaphore(value: 0)
+
+                DispatchQueue.global(qos: .utility).async {
+                    process.waitUntilExit()
+                    semaphore.signal()
+                }
+
+                let result = semaphore.wait(timeout: .now() + self.terminationTimeoutSeconds)
+                if result == .timedOut {
+                    self.logger.warning("Process \(pid) for connection \(id) did not exit gracefully, sending SIGKILL")
+                    kill(pid, SIGKILL)
+                    process.waitUntilExit()
+                }
             }
 
-            self?.stateQueue.sync {
-                self?.processes.removeAll()
-                self?.cleanupAllPipesUnsafe()
+            self.stateQueue.sync {
+                self.processes.removeAll()
+                self.cleanupAllPipesUnsafe()
             }
         }
     }
@@ -618,7 +653,9 @@ final class ConnectionManager {
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = UInt16(port).bigEndian
-        addr.sin_addr.s_addr = INADDR_ANY
+        // Bind to localhost specifically to match where cloud-sql-proxy listens.
+        // Using INADDR_ANY (0.0.0.0) can cause false negatives on systems with multiple interfaces.
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
 
         let result = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
