@@ -116,8 +116,8 @@ final class ConfigManager {
 
         } catch {
             logger.error("Failed to migrate from JSON config: \(error.localizedDescription)")
-            // Mark as migrated anyway to avoid repeated failures
-            UserDefaults.standard.set(true, forKey: migratedKey)
+            // Do NOT mark as migrated on failure - allow retry on next launch
+            // User's legacy config data will be preserved and migration can be retried
         }
     }
 
