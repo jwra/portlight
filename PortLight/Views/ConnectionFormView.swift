@@ -6,6 +6,7 @@ struct ConnectionFormView: View {
     let configManager: ConfigManager
     let existingConnection: DBConnection?
 
+    @State private var connectionId: String
     @State private var name: String = ""
     @State private var instanceConnectionName: String = ""
     @State private var port: String = "5432"
@@ -19,10 +20,10 @@ struct ConnectionFormView: View {
         isEditing ? "Edit Connection" : "Add Connection"
     }
 
-    // Validation
+    // Computed property now uses the stored connectionId instead of generating new UUID each time
     private var currentConnection: DBConnection {
         DBConnection(
-            id: existingConnection?.id ?? UUID().uuidString,
+            id: connectionId,
             name: name,
             instanceConnectionName: instanceConnectionName,
             port: Int(port) ?? 0,
@@ -57,6 +58,8 @@ struct ConnectionFormView: View {
     init(configManager: ConfigManager, existingConnection: DBConnection? = nil) {
         self.configManager = configManager
         self.existingConnection = existingConnection
+        // Generate UUID once at init time, or use existing connection's ID
+        _connectionId = State(initialValue: existingConnection?.id ?? UUID().uuidString)
     }
 
     var body: some View {
