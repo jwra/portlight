@@ -102,15 +102,20 @@ struct MenuBarView: View {
                 .foregroundStyle(.secondary)
                 .padding()
         } else {
-            ForEach(manager.config.connections) { connection in
-                let connectionIssues = validationResult?.issues(for: connection.id) ?? []
-                ConnectionRowView(
-                    connection: connection,
-                    status: manager.status(for: connection),
-                    validationIssues: connectionIssues,
-                    onToggle: { manager.toggle(connection) }
-                )
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(manager.config.connections) { connection in
+                        let connectionIssues = validationResult?.issues(for: connection.id) ?? []
+                        ConnectionRowView(
+                            connection: connection,
+                            status: manager.status(for: connection),
+                            validationIssues: connectionIssues,
+                            onToggle: { manager.toggle(connection) }
+                        )
+                    }
+                }
             }
+            .frame(maxHeight: 350)
         }
     }
 

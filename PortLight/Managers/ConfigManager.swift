@@ -17,8 +17,8 @@ final class ConfigManager {
     /// Last validation result from config loading - publicly readable for UI
     var lastValidationResult: ConfigValidationResult?
 
-    /// Callback fired when connections change (for ConnectionManager to observe)
-    var onConnectionsChanged: (() -> Void)?
+    /// Callback fired when config changes (connections or binaryPath) for ConnectionManager to observe
+    var onConfigChanged: (() -> Void)?
 
     // MARK: - Stored Properties
 
@@ -40,7 +40,7 @@ final class ConfigManager {
                 UserDefaults.standard.set(data, forKey: connectionsKey)
                 logger.info("Saved \(newValue.count) connections")
                 revalidate()
-                onConnectionsChanged?()
+                onConfigChanged?()
             } catch {
                 logger.error("Failed to encode connections: \(error.localizedDescription)")
             }
@@ -55,7 +55,7 @@ final class ConfigManager {
             UserDefaults.standard.set(newValue, forKey: binaryPathKey)
             logger.info("Binary path updated to: \(newValue)")
             revalidate()
-            onConnectionsChanged?()
+            onConfigChanged?()
         }
     }
 

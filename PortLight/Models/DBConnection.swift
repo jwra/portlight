@@ -63,19 +63,21 @@ struct DBConnection: Codable, Identifiable, Equatable {
     }
 
     /// Validates GCP instance connection name format: project:region:instance
+    /// Uses relaxed validation to avoid false negatives - cloud-sql-proxy provides authoritative validation.
     private static func isValidInstanceConnectionName(_ name: String) -> Bool {
         let components = name.split(separator: ":")
         guard components.count == 3 else { return false }
 
-        // Each component should be non-empty and contain valid characters
-        // GCP project IDs: lowercase letters, digits, hyphens (6-30 chars)
-        // Region: lowercase letters, digits, hyphens
-        // Instance: lowercase letters, digits, hyphens
-        let validPattern = "^[a-z][a-z0-9-]*$"
+        // Basic validation: non-empty components with valid characters.
+        // GCP allows lowercase letters, digits, and hyphens.
+        // The pattern allows single-character components and doesn't enforce
+        // strict GCP rules - let cloud-sql-proxy handle authoritative validation.
+        let validPattern = "^[a-z][a-z0-9-]*[a-z0-9]$|^[a-z]$"
         guard let regex = try? NSRegularExpression(pattern: validPattern) else { return false }
 
         for component in components {
             let str = String(component)
+            if str.isEmpty { return false }
             let range = NSRange(str.startIndex..., in: str)
             if regex.firstMatch(in: str, range: range) == nil {
                 return false

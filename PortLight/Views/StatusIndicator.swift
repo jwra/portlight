@@ -12,17 +12,19 @@ struct StatusIndicator: View {
             .frame(width: 10, height: 10)
             .opacity(opacity)
             .scaleEffect(scale)
-            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isAnimating)
-            .animation(.easeInOut(duration: 0.3).repeatCount(3, autoreverses: true), value: errorPulse)
             .onChange(of: status) { _, newValue in
                 updateAnimation(for: newValue)
                 if case .error = newValue {
-                    errorPulse.toggle()
+                    withAnimation(.easeInOut(duration: 0.3).repeatCount(3, autoreverses: true)) {
+                        errorPulse.toggle()
+                    }
                 }
             }
             .onAppear {
                 updateAnimation(for: status)
             }
+            // Use single animation modifier for the connecting pulse
+            .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isAnimating)
     }
 
     private var opacity: Double {
@@ -40,6 +42,12 @@ struct StatusIndicator: View {
     }
 
     private func updateAnimation(for status: ConnectionStatus) {
-        isAnimating = (status == .connecting)
+        // Use `if case` pattern matching consistently for all status checks.
+        // This is more future-proof if associated values are added to other cases.
+        if case .connecting = status {
+            isAnimating = true
+        } else {
+            isAnimating = false
+        }
     }
 }

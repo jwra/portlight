@@ -25,6 +25,9 @@ final class ConnectionManager {
     private let pollIntervalSeconds: TimeInterval = 0.1
     /// Timeout for graceful termination before sending SIGKILL (seconds)
     private let terminationTimeoutSeconds: TimeInterval = 5.0
+    /// Timeout for socket connection attempt during port readiness check (milliseconds).
+    /// 50ms is chosen to be responsive without excessive CPU usage during polling.
+    private let socketConnectTimeoutMs: Int32 = 50
 
     var hasActiveConnections: Bool {
         statuses.values.contains { $0.isActive }
@@ -46,7 +49,10 @@ final class ConnectionManager {
     }
 
     private func setupConfigObserver() {
-        configManager.onConnectionsChanged = { [weak self] in
+        // IMPORTANT: Use [weak self] to prevent retain cycle.
+        // ConnectionManager holds strong ref to ConfigManager,
+        // and this callback captures ConnectionManager.
+        configManager.onConfigChanged = { [weak self] in
             DispatchQueue.main.async {
                 self?.reloadConfig()
             }
@@ -577,7 +583,11 @@ final class ConnectionManager {
 
     private func truncateMessage(_ message: String) -> String {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.count > 120 ? String(trimmed.prefix(117)) + "..." : trimmed
+        let maxLength = 250
+        if trimmed.count <= maxLength {
+            return trimmed
+        }
+        return String(trimmed.prefix(maxLength - 3)) + "..."
     }
 
     /// Converts raw proxy errors into user-friendly messages with actionable guidance
@@ -810,7 +820,7 @@ final class ConnectionManager {
         if errno == EINPROGRESS {
             // Use poll instead of select for simpler API
             var pollFD = pollfd(fd: socketFD, events: Int16(POLLOUT), revents: 0)
-            let pollResult = poll(&pollFD, 1, 50) // 50ms timeout
+            let pollResult = poll(&pollFD, 1, socketConnectTimeoutMs)
 
             if pollResult > 0 && (pollFD.revents & Int16(POLLOUT)) != 0 {
                 // Check if connection succeeded
