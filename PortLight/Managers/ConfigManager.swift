@@ -8,8 +8,8 @@ final class ConfigManager {
     private let fileManager = FileManager.default
     private var didLogFallback = false
 
-    /// Last validation result from config loading
-    private(set) var lastValidationResult: ConfigValidationResult?
+    /// Last validation result from config loading - publicly readable for UI
+    var lastValidationResult: ConfigValidationResult?
 
     var configURL: URL {
         configDirectoryURL.appendingPathComponent("config.json")

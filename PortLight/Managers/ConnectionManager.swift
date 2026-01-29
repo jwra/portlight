@@ -10,7 +10,10 @@ final class ConnectionManager {
     private var errorPipes: [String: Pipe] = [:]
     private var readinessChecks: [String: DispatchWorkItem] = [:]
     private let logger = Logger(subsystem: "net.jwra.PortLight", category: "ConnectionManager")
-    private let configManager: ConfigManager
+    let configManager: ConfigManager
+
+    /// Serial queue for thread-safe access to processes, errorPipes, and readinessChecks
+    private let stateQueue = DispatchQueue(label: "net.jwra.PortLight.ConnectionManager.state")
 
     /// Maximum time to wait for proxy to become ready (seconds)
     private let connectionTimeoutSeconds: TimeInterval = 30
@@ -54,12 +57,14 @@ final class ConnectionManager {
 
         // Disconnect removed connections
         for (id, _) in oldById where newById[id] == nil {
-            cancelReadinessCheck(for: id)
-            if let process = processes[id] {
-                process.terminate()
-                process.waitUntilExit()
-                processes.removeValue(forKey: id)
-                errorPipes.removeValue(forKey: id)
+            stateQueue.sync {
+                cancelReadinessCheckUnsafe(for: id)
+                if let process = processes[id] {
+                    process.terminate()
+                    process.waitUntilExit()
+                    processes.removeValue(forKey: id)
+                    errorPipes.removeValue(forKey: id)
+                }
             }
             statuses.removeValue(forKey: id)
         }
@@ -69,12 +74,14 @@ final class ConnectionManager {
             if let oldConn = oldById[id] {
                 if newConn.requiresReconnect(comparedTo: oldConn) {
                     // Port changed - need to reconnect
-                    cancelReadinessCheck(for: id)
-                    if let process = processes[id] {
-                        process.terminate()
-                        process.waitUntilExit()
-                        processes.removeValue(forKey: id)
-                        errorPipes.removeValue(forKey: id)
+                    stateQueue.sync {
+                        cancelReadinessCheckUnsafe(for: id)
+                        if let process = processes[id] {
+                            process.terminate()
+                            process.waitUntilExit()
+                            processes.removeValue(forKey: id)
+                            errorPipes.removeValue(forKey: id)
+                        }
                     }
                     statuses[id] = .disconnected
                 }
@@ -104,8 +111,18 @@ final class ConnectionManager {
     func connect(_ connection: DBConnection) {
         logger.info("Connecting: \(connection.name)")
 
+        // Pre-connect validation
+        let validationIssues = connection.validate()
+        let errors = validationIssues.filter { $0.isError }
+        if !errors.isEmpty {
+            let errorMessage = errors.map { $0.message }.joined(separator: "; ")
+            setStatus(.error(errorMessage), for: connection.id)
+            logger.error("Validation failed for \(connection.name): \(errorMessage)")
+            return
+        }
+
         guard FileManager.default.isExecutableFile(atPath: config.binaryPath) else {
-            setStatus(.error("cloud-sql-proxy not found at \(config.binaryPath)"), for: connection)
+            setStatus(.error("cloud-sql-proxy not found at \(config.binaryPath)"), for: connection.id)
             logger.error("Binary not found at: \(self.config.binaryPath)")
             return
         }
@@ -115,16 +132,16 @@ final class ConnectionManager {
             $0.port == connection.port &&
             statuses[$0.id]?.isActive == true
         }) {
-            setStatus(.error("Port \(connection.port) used by \(conflict.name)"), for: connection)
+            setStatus(.error("Port \(connection.port) used by \(conflict.name)"), for: connection.id)
             return
         }
 
         if !isPortAvailable(connection.port) {
-            setStatus(.error("Port \(connection.port) in use"), for: connection)
+            setStatus(.error("Port \(connection.port) in use"), for: connection.id)
             return
         }
 
-        setStatus(.connecting, for: connection)
+        setStatus(.connecting, for: connection.id)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.binaryPath)
@@ -137,22 +154,25 @@ final class ConnectionManager {
         process.standardError = errorPipe
         process.standardOutput = FileHandle.nullDevice
 
+        let connectionId = connection.id
         process.terminationHandler = { [weak self] terminated in
             DispatchQueue.main.async {
-                self?.handleProcessTermination(terminated, connection: connection)
+                self?.handleProcessTermination(terminated, connectionId: connectionId)
             }
         }
 
-        monitorStderr(errorPipe, for: connection)
+        monitorStderr(errorPipe, for: connection.id)
 
         do {
             try process.run()
-            processes[connection.id] = process
-            errorPipes[connection.id] = errorPipe
+            stateQueue.sync {
+                processes[connection.id] = process
+                errorPipes[connection.id] = errorPipe
+            }
 
-            waitForProxyReady(connection: connection, port: connection.port)
+            waitForProxyReady(connectionId: connection.id, port: connection.port, connectionName: connection.name)
         } catch {
-            setStatus(.error("Failed to start: \(error.localizedDescription)"), for: connection)
+            setStatus(.error("Failed to start: \(error.localizedDescription)"), for: connection.id)
             logger.error("Failed to start proxy: \(error.localizedDescription)")
         }
     }
@@ -160,31 +180,45 @@ final class ConnectionManager {
     func disconnect(_ connection: DBConnection) {
         logger.info("Disconnecting: \(connection.name)")
 
-        cancelReadinessCheck(for: connection.id)
+        let process: Process? = stateQueue.sync {
+            cancelReadinessCheckUnsafe(for: connection.id)
+            return processes[connection.id]
+        }
 
-        guard let process = processes[connection.id] else {
-            setStatus(.disconnected, for: connection)
+        guard let process else {
+            setStatus(.disconnected, for: connection.id)
             return
         }
 
         process.terminate()
         process.waitUntilExit()
 
-        processes.removeValue(forKey: connection.id)
-        errorPipes.removeValue(forKey: connection.id)
-        setStatus(.disconnected, for: connection)
+        stateQueue.sync {
+            processes.removeValue(forKey: connection.id)
+            errorPipes.removeValue(forKey: connection.id)
+        }
+        setStatus(.disconnected, for: connection.id)
     }
 
     func disconnectAll() {
-        for (id, _) in readinessChecks {
-            cancelReadinessCheck(for: id)
+        let allProcesses: [Process] = stateQueue.sync {
+            for (id, _) in readinessChecks {
+                cancelReadinessCheckUnsafe(for: id)
+            }
+            let procs = Array(processes.values)
+            return procs
         }
-        for (_, process) in processes {
+
+        for process in allProcesses {
             process.terminate()
             process.waitUntilExit()
         }
-        processes.removeAll()
-        errorPipes.removeAll()
+
+        stateQueue.sync {
+            processes.removeAll()
+            errorPipes.removeAll()
+        }
+
         for key in statuses.keys {
             statuses[key] = .disconnected
         }
@@ -227,27 +261,31 @@ final class ConnectionManager {
         }
     }
 
-    private func setStatus(_ status: ConnectionStatus, for connection: DBConnection) {
+    private func setStatus(_ status: ConnectionStatus, for connectionId: String) {
         DispatchQueue.main.async {
-            self.statuses[connection.id] = status
+            self.statuses[connectionId] = status
         }
     }
 
-    private func handleProcessTermination(_ process: Process, connection: DBConnection) {
+    private func handleProcessTermination(_ process: Process, connectionId: String) {
         let exitCode = process.terminationStatus
 
-        processes.removeValue(forKey: connection.id)
-        errorPipes.removeValue(forKey: connection.id)
+        stateQueue.sync {
+            processes.removeValue(forKey: connectionId)
+            errorPipes.removeValue(forKey: connectionId)
+        }
 
-        if exitCode != 0 && exitCode != 15 {
-            setStatus(.error("Exited with code \(exitCode)"), for: connection)
-            logger.error("Proxy for \(connection.name) exited with code \(exitCode)")
+        // Handle clean termination: exit code 0, 15 (raw SIGTERM), or 143 (128 + SIGTERM)
+        let isCleanExit = exitCode == 0 || exitCode == 15 || exitCode == 143
+        if !isCleanExit {
+            setStatus(.error("Exited with code \(exitCode)"), for: connectionId)
+            logger.error("Proxy for \(connectionId) exited with code \(exitCode)")
         } else {
-            setStatus(.disconnected, for: connection)
+            setStatus(.disconnected, for: connectionId)
         }
     }
 
-    private func monitorStderr(_ pipe: Pipe, for connection: DBConnection) {
+    private func monitorStderr(_ pipe: Pipe, for connectionId: String) {
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
@@ -255,7 +293,7 @@ final class ConnectionManager {
             if output.lowercased().contains("error") || output.lowercased().contains("failed") {
                 DispatchQueue.main.async {
                     let message = self?.extractErrorMessage(from: output) ?? "Connection failed"
-                    self?.setStatus(.error(message), for: connection)
+                    self?.setStatus(.error(message), for: connectionId)
                 }
             }
         }
@@ -294,20 +332,21 @@ final class ConnectionManager {
     }
 
     /// Polls the port until the proxy is accepting connections or timeout occurs
-    private func waitForProxyReady(connection: DBConnection, port: Int) {
+    private func waitForProxyReady(connectionId: String, port: Int, connectionName: String) {
         let startTime = Date()
-        let connectionId = connection.id
 
         let workItem = DispatchWorkItem { [weak self] in
             self?.pollPortReadiness(
                 connectionId: connectionId,
                 port: port,
                 startTime: startTime,
-                connectionName: connection.name
+                connectionName: connectionName
             )
         }
 
-        readinessChecks[connectionId] = workItem
+        stateQueue.sync {
+            readinessChecks[connectionId] = workItem
+        }
         DispatchQueue.global(qos: .userInitiated).async(execute: workItem)
     }
 
@@ -317,22 +356,28 @@ final class ConnectionManager {
         startTime: Date,
         connectionName: String
     ) {
-        // Check if we should stop polling
-        guard let workItem = readinessChecks[connectionId], !workItem.isCancelled else {
-            return
+        // Check if we should stop polling (thread-safe read)
+        let shouldContinue: Bool = stateQueue.sync {
+            guard let workItem = readinessChecks[connectionId], !workItem.isCancelled else {
+                return false
+            }
+            guard processes[connectionId]?.isRunning == true else {
+                readinessChecks.removeValue(forKey: connectionId)
+                return false
+            }
+            return true
         }
 
-        // Check if process is still running
-        guard processes[connectionId]?.isRunning == true else {
-            readinessChecks.removeValue(forKey: connectionId)
-            return
-        }
+        guard shouldContinue else { return }
 
         // Check if we're still in connecting state (might have errored via stderr)
+        // This read is on main queue data, but ConnectionStatus is value type so reading is safe
         if case .connecting = statuses[connectionId] {
             // Continue checking
         } else {
-            readinessChecks.removeValue(forKey: connectionId)
+            stateQueue.sync {
+                readinessChecks.removeValue(forKey: connectionId)
+            }
             return
         }
 
@@ -342,13 +387,11 @@ final class ConnectionManager {
             logger.warning("Connection timeout for \(connectionName) after \(Int(elapsed))s")
             DispatchQueue.main.async { [weak self] in
                 guard let self, case .connecting = self.statuses[connectionId] else { return }
-                self.setStatus(.error("Connection timeout"), for: DBConnection(
-                    name: connectionName,
-                    instanceConnectionName: connectionId,
-                    port: port
-                ))
+                self.setStatus(.error("Connection timeout"), for: connectionId)
             }
-            readinessChecks.removeValue(forKey: connectionId)
+            stateQueue.sync {
+                readinessChecks.removeValue(forKey: connectionId)
+            }
             return
         }
 
@@ -357,13 +400,11 @@ final class ConnectionManager {
             logger.info("Proxy ready for \(connectionName) on port \(port) after \(String(format: "%.1f", elapsed))s")
             DispatchQueue.main.async { [weak self] in
                 guard let self, case .connecting = self.statuses[connectionId] else { return }
-                self.setStatus(.connected, for: DBConnection(
-                    name: connectionName,
-                    instanceConnectionName: connectionId,
-                    port: port
-                ))
+                self.setStatus(.connected, for: connectionId)
             }
-            readinessChecks.removeValue(forKey: connectionId)
+            stateQueue.sync {
+                readinessChecks.removeValue(forKey: connectionId)
+            }
             return
         }
 
@@ -387,9 +428,8 @@ final class ConnectionManager {
         defer { close(socketFD) }
 
         // Set non-blocking for quick timeout
-        var flags = fcntl(socketFD, F_GETFL, 0)
-        flags |= O_NONBLOCK
-        fcntl(socketFD, F_SETFL, flags)
+        let flags = fcntl(socketFD, F_GETFL, 0)
+        _ = fcntl(socketFD, F_SETFL, flags | O_NONBLOCK)
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
@@ -399,26 +439,22 @@ final class ConnectionManager {
 
         let result = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                connect(socketFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+                Darwin.connect(socketFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
 
-        // Check if connected or connection in progress
+        // Check if connected immediately
         if result == 0 {
             return true
         }
 
         // For non-blocking socket, EINPROGRESS means connection is being established
         if errno == EINPROGRESS {
-            // Use select to wait briefly for connection
-            var writeSet = fd_set()
-            __darwin_fd_zero(&writeSet)
-            __darwin_fd_set(socketFD, &writeSet)
+            // Use poll instead of select for simpler API
+            var pollFD = pollfd(fd: socketFD, events: Int16(POLLOUT), revents: 0)
+            let pollResult = poll(&pollFD, 1, 50) // 50ms timeout
 
-            var timeout = timeval(tv_sec: 0, tv_usec: 50000) // 50ms timeout
-            let selectResult = select(socketFD + 1, nil, &writeSet, nil, &timeout)
-
-            if selectResult > 0 && __darwin_fd_isset(socketFD, &writeSet) != 0 {
+            if pollResult > 0 && (pollFD.revents & Int16(POLLOUT)) != 0 {
                 // Check if connection succeeded
                 var error: Int32 = 0
                 var len = socklen_t(MemoryLayout<Int32>.size)
@@ -430,7 +466,8 @@ final class ConnectionManager {
         return false
     }
 
-    private func cancelReadinessCheck(for connectionId: String) {
+    /// Must be called while holding stateQueue lock
+    private func cancelReadinessCheckUnsafe(for connectionId: String) {
         readinessChecks[connectionId]?.cancel()
         readinessChecks.removeValue(forKey: connectionId)
     }

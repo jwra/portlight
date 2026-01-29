@@ -49,17 +49,9 @@ struct AppConfig: Codable {
             }
         }
 
-        // Check for duplicate ports
-        let duplicates = Dictionary(grouping: connections, by: { $0.port })
-            .filter { $1.count > 1 }
-        for (port, conns) in duplicates {
-            let names = conns.map { $0.name }.joined(separator: ", ")
-            for conn in conns {
-                var existing = issues[conn.id] ?? []
-                existing.append(.error("Port \(port) is used by multiple connections: \(names)", field: "port"))
-                issues[conn.id] = existing
-            }
-        }
+        // Note: Duplicate ports are allowed in config - users may want to switch
+        // between connections on the same port. Runtime port conflict detection
+        // in ConnectionManager.connect() handles the case where both are active.
 
         return ConfigValidationResult(issues: issues)
     }
