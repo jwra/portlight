@@ -634,21 +634,39 @@ final class ConnectionManager {
         guard shouldContinue else { return }
 
         // Check if we're still in connecting state (might have errored via stderr)
-        // Must check on main thread since statuses is @Observable
-        var isStillConnecting = false
-        DispatchQueue.main.sync {
-            if case .connecting = statuses[connectionId] {
-                isStillConnecting = true
+        // IMPORTANT: Use async dispatch to main thread to avoid potential deadlock.
+        // Using sync here could deadlock if main thread is waiting on this background work.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+
+            // Verify we're still in connecting state
+            guard case .connecting = self.statuses[connectionId] else {
+                self.stateQueue.sync {
+                    self.readinessChecks.removeValue(forKey: connectionId)
+                }
+                return
+            }
+
+            // Continue polling work on background queue
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.continuePolling(
+                    connectionId: connectionId,
+                    port: port,
+                    startTime: startTime,
+                    connectionName: connectionName
+                )
             }
         }
+    }
 
-        guard isStillConnecting else {
-            stateQueue.sync {
-                readinessChecks.removeValue(forKey: connectionId)
-            }
-            return
-        }
-
+    /// Continues the polling logic after confirming connection is still in connecting state.
+    /// Called from background queue after main thread status check.
+    private func continuePolling(
+        connectionId: String,
+        port: Int,
+        startTime: Date,
+        connectionName: String
+    ) {
         // Check timeout
         let elapsed = Date().timeIntervalSince(startTime)
         if elapsed >= connectionTimeoutSeconds {
