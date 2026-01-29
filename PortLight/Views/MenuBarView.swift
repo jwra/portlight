@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Bindable var manager: ConnectionManager
+    @State private var showDisconnectAllConfirmation = false
 
     private var validationResult: ConfigValidationResult? {
         manager.configManager.lastValidationResult
@@ -10,6 +11,10 @@ struct MenuBarView: View {
 
     private var hasValidationErrors: Bool {
         validationResult?.isValid == false
+    }
+
+    private var activeConnectionCount: Int {
+        manager.statuses.values.filter { $0.isActive }.count
     }
 
     var body: some View {
@@ -121,9 +126,26 @@ struct MenuBarView: View {
 
             if manager.hasActiveConnections {
                 MenuButton(title: "Disconnect All", icon: "xmark.circle") {
-                    manager.disconnectAll()
+                    // Show confirmation when multiple connections are active
+                    if activeConnectionCount > 1 {
+                        showDisconnectAllConfirmation = true
+                    } else {
+                        manager.disconnectAll()
+                    }
                 }
             }
+        }
+        .confirmationDialog(
+            "Disconnect all connections?",
+            isPresented: $showDisconnectAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Disconnect All", role: .destructive) {
+                manager.disconnectAll()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will disconnect \(activeConnectionCount) active connections.")
         }
     }
 
