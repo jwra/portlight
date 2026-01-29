@@ -9,6 +9,7 @@ struct ManageConnectionsView: View {
     @State private var showingAddSheet = false
     @State private var connectionToDelete: DBConnection?
     @State private var showingDeleteConfirmation = false
+    @State private var showingExecutableError = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,6 +51,11 @@ struct ManageConnectionsView: View {
             }
         } message: { connection in
             Text("Are you sure you want to delete \"\(connection.name)\"? This action cannot be undone.")
+        }
+        .alert("Invalid Selection", isPresented: $showingExecutableError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("The selected file is not executable. Please select a valid cloud-sql-proxy binary.")
         }
     }
 
@@ -154,10 +160,16 @@ struct ManageConnectionsView: View {
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
         panel.canCreateDirectories = false
-        panel.allowedContentTypes = [.unixExecutable, .executable, .item]
+        // Only allow executable types - removed .item which allowed any file
+        panel.allowedContentTypes = [.unixExecutable, .executable]
 
         if panel.runModal() == .OK, let url = panel.url {
-            configManager.binaryPath = url.path
+            // Post-selection validation: verify file is actually executable
+            if FileManager.default.isExecutableFile(atPath: url.path) {
+                configManager.binaryPath = url.path
+            } else {
+                showingExecutableError = true
+            }
         }
     }
 }
