@@ -6,53 +6,195 @@ import OSLog
 final class ConfigManager {
     private let logger = Logger(subsystem: "net.jwra.PortLight", category: "Config")
     private let fileManager = FileManager.default
-    private var didLogFallback = false
+
+    // UserDefaults keys
+    private let connectionsKey = "connections"
+    private let binaryPathKey = "binaryPath"
+    private let migratedKey = "migratedFromJSON"
+
+    static let defaultBinaryPath = "/usr/local/bin/cloud-sql-proxy"
 
     /// Last validation result from config loading - publicly readable for UI
     var lastValidationResult: ConfigValidationResult?
 
-    var configURL: URL {
-        configDirectoryURL.appendingPathComponent("config.json")
+    /// Callback fired when connections change (for ConnectionManager to observe)
+    var onConnectionsChanged: (() -> Void)?
+
+    // MARK: - Stored Properties
+
+    var connections: [DBConnection] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: connectionsKey) else {
+                return []
+            }
+            do {
+                return try JSONDecoder().decode([DBConnection].self, from: data)
+            } catch {
+                logger.error("Failed to decode connections: \(error.localizedDescription)")
+                return []
+            }
+        }
+        set {
+            do {
+                let data = try JSONEncoder().encode(newValue)
+                UserDefaults.standard.set(data, forKey: connectionsKey)
+                logger.info("Saved \(newValue.count) connections")
+                revalidate()
+                onConnectionsChanged?()
+            } catch {
+                logger.error("Failed to encode connections: \(error.localizedDescription)")
+            }
+        }
     }
 
-    var configDirectoryURL: URL {
+    var binaryPath: String {
+        get {
+            UserDefaults.standard.string(forKey: binaryPathKey) ?? Self.defaultBinaryPath
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: binaryPathKey)
+            logger.info("Binary path updated to: \(newValue)")
+            revalidate()
+            onConnectionsChanged?()
+        }
+    }
+
+    // MARK: - Legacy Config Path (for migration)
+
+    private var legacyConfigURL: URL {
+        legacyConfigDirectoryURL.appendingPathComponent("config.json")
+    }
+
+    private var legacyConfigDirectoryURL: URL {
         if let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
             return appSupport.appendingPathComponent("PortLight")
-        }
-
-        // Fallback to home directory if Application Support unavailable
-        if !didLogFallback {
-            logger.warning("Application Support directory unavailable, using fallback location")
-            didLogFallback = true
         }
         let homeDir = fileManager.homeDirectoryForCurrentUser
         return homeDir.appendingPathComponent(".portlight")
     }
 
-    func loadConfig() -> AppConfig {
-        ensureConfigDirectoryExists()
+    // MARK: - Initialization
 
-        if !fileManager.fileExists(atPath: configURL.path) {
-            logger.info("No config found, creating default")
-            saveConfig(AppConfig.defaultConfig)
+    init() {
+        migrateFromJSONIfNeeded()
+        revalidate()
+    }
+
+    // MARK: - Migration
+
+    private func migrateFromJSONIfNeeded() {
+        // Check if already migrated
+        guard !UserDefaults.standard.bool(forKey: migratedKey) else { return }
+
+        // Check if legacy config exists
+        guard fileManager.fileExists(atPath: legacyConfigURL.path) else {
+            // No legacy config, mark as migrated so we don't check again
+            UserDefaults.standard.set(true, forKey: migratedKey)
+            logger.info("No legacy config found, skipping migration")
+            return
         }
 
         do {
-            let data = try Data(contentsOf: configURL)
-            let config = try JSONDecoder().decode(AppConfig.self, from: data)
-            logger.info("Loaded config with \(config.connections.count) connections")
+            let data = try Data(contentsOf: legacyConfigURL)
+            let legacyConfig = try JSONDecoder().decode(AppConfig.self, from: data)
 
-            // Validate and log issues
-            let validation = config.validate()
-            lastValidationResult = validation
-            logValidationIssues(validation)
+            // Migrate connections
+            connections = legacyConfig.connections
 
-            return config
+            // Migrate binary path (only if different from default)
+            if legacyConfig.binaryPath != Self.defaultBinaryPath {
+                binaryPath = legacyConfig.binaryPath
+            }
+
+            // Mark as migrated
+            UserDefaults.standard.set(true, forKey: migratedKey)
+            logger.info("Successfully migrated \(legacyConfig.connections.count) connections from JSON config")
+
+            // Rename the old config file to indicate it's been migrated
+            let backupURL = legacyConfigDirectoryURL.appendingPathComponent("config.json.migrated")
+            try? fileManager.moveItem(at: legacyConfigURL, to: backupURL)
+
         } catch {
-            logger.error("Failed to load config: \(error.localizedDescription)")
-            lastValidationResult = nil
-            return AppConfig.defaultConfig
+            logger.error("Failed to migrate from JSON config: \(error.localizedDescription)")
+            // Mark as migrated anyway to avoid repeated failures
+            UserDefaults.standard.set(true, forKey: migratedKey)
         }
+    }
+
+    // MARK: - CRUD Operations
+
+    func addConnection(_ connection: DBConnection) {
+        var current = connections
+        current.append(connection)
+        connections = current
+        logger.info("Added connection: \(connection.name)")
+    }
+
+    func updateConnection(_ connection: DBConnection) {
+        var current = connections
+        if let index = current.firstIndex(where: { $0.id == connection.id }) {
+            current[index] = connection
+            connections = current
+            logger.info("Updated connection: \(connection.name)")
+        } else {
+            logger.warning("Connection not found for update: \(connection.id)")
+        }
+    }
+
+    func deleteConnection(id: String) {
+        var current = connections
+        if let index = current.firstIndex(where: { $0.id == id }) {
+            let removed = current.remove(at: index)
+            connections = current
+            logger.info("Deleted connection: \(removed.name)")
+        } else {
+            logger.warning("Connection not found for deletion: \(id)")
+        }
+    }
+
+    func connection(byId id: String) -> DBConnection? {
+        connections.first { $0.id == id }
+    }
+
+    // MARK: - Validation
+
+    private func revalidate() {
+        lastValidationResult = validate()
+        logValidationIssues(lastValidationResult!)
+    }
+
+    func validate() -> ConfigValidationResult {
+        var issues: [String: [ValidationIssue]] = [:]
+
+        // Validate binary path
+        var binaryIssues: [ValidationIssue] = []
+        let path = binaryPath
+        if path.trimmingCharacters(in: .whitespaces).isEmpty {
+            binaryIssues.append(.error("Binary path cannot be empty", field: "binaryPath"))
+        } else if !fileManager.fileExists(atPath: path) {
+            binaryIssues.append(.error("Binary not found at \(path)", field: "binaryPath"))
+        } else if !fileManager.isExecutableFile(atPath: path) {
+            binaryIssues.append(.error("Binary at \(path) is not executable", field: "binaryPath"))
+        }
+        if !binaryIssues.isEmpty {
+            issues["binaryPath"] = binaryIssues
+        }
+
+        // Validate connections
+        let conns = connections
+        if conns.isEmpty {
+            issues["connections"] = [.warning("No connections configured", field: "connections")]
+        }
+
+        // Validate each connection
+        for connection in conns {
+            let connectionIssues = connection.validate()
+            if !connectionIssues.isEmpty {
+                issues[connection.id] = connectionIssues
+            }
+        }
+
+        return ConfigValidationResult(issues: issues)
     }
 
     private func logValidationIssues(_ result: ConfigValidationResult) {
@@ -67,33 +209,19 @@ final class ConfigManager {
         }
     }
 
+    // MARK: - Legacy Compatibility (for transition period)
+
+    /// Returns an AppConfig for compatibility with existing ConnectionManager code
+    func loadConfig() -> AppConfig {
+        let config = AppConfig(binaryPath: binaryPath, connections: connections)
+        lastValidationResult = config.validate()
+        logValidationIssues(lastValidationResult!)
+        return config
+    }
+
+    /// Saves an AppConfig for compatibility with existing code
     func saveConfig(_ config: AppConfig) {
-        do {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(config)
-            try data.write(to: configURL)
-            logger.info("Config saved")
-        } catch {
-            logger.error("Failed to save config: \(error.localizedDescription)")
-        }
-    }
-
-    func openConfigInEditor() {
-        NSWorkspace.shared.open(configURL)
-    }
-
-    func revealConfigInFinder() {
-        NSWorkspace.shared.selectFile(configURL.path, inFileViewerRootedAtPath: configDirectoryURL.path)
-    }
-
-    private func ensureConfigDirectoryExists() {
-        guard !fileManager.fileExists(atPath: configDirectoryURL.path) else { return }
-        do {
-            try fileManager.createDirectory(at: configDirectoryURL, withIntermediateDirectories: true)
-            logger.info("Created config directory")
-        } catch {
-            logger.error("Failed to create config directory: \(error.localizedDescription)")
-        }
+        binaryPath = config.binaryPath
+        connections = config.connections
     }
 }

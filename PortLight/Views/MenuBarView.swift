@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct MenuBarView: View {
+    @Environment(\.openWindow) private var openWindow
     @Bindable var manager: ConnectionManager
 
     private var validationResult: ConfigValidationResult? {
@@ -13,6 +14,10 @@ struct MenuBarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if let error = manager.lastError {
+                errorBanner(name: error.connectionName, message: error.message)
+                Divider()
+            }
             if hasValidationErrors {
                 validationBanner
                 Divider()
@@ -30,6 +35,37 @@ struct MenuBarView: View {
     }
 
     @ViewBuilder
+    private func errorBanner(name: String, message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.circle.fill")
+                .foregroundStyle(.red)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(.caption, weight: .medium))
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer()
+
+            Button {
+                manager.clearError()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.red.opacity(0.1))
+    }
+
+    @ViewBuilder
     private var validationBanner: some View {
         let errorCount = validationResult?.allErrors.count ?? 0
         HStack(spacing: 8) {
@@ -38,13 +74,13 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Config has \(errorCount) error\(errorCount == 1 ? "" : "s")")
                     .font(.system(.caption, weight: .medium))
-                Text("Edit config to fix")
+                Text("Open Manage Connections to fix")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button("Edit") {
-                manager.openConfig()
+            Button("Fix") {
+                openWindow(id: "manage-connections")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -75,16 +111,12 @@ struct MenuBarView: View {
 
     private var actions: some View {
         VStack(alignment: .leading, spacing: 0) {
+            MenuButton(title: "Manage Connections...", icon: "slider.horizontal.3") {
+                openWindow(id: "manage-connections")
+            }
+
             MenuButton(title: "Reload Config", icon: "arrow.clockwise") {
                 manager.reloadConfig()
-            }
-
-            MenuButton(title: "Edit Config...", icon: "pencil") {
-                manager.openConfig()
-            }
-
-            MenuButton(title: "Reveal Config in Finder", icon: "folder") {
-                manager.revealConfig()
             }
 
             if manager.hasActiveConnections {

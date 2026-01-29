@@ -95,11 +95,10 @@ struct ConnectionRowView: View {
                 Text("Disconnect")
                     .font(.caption)
                     .foregroundStyle(.red)
-            case .error(let message):
-                Text("Error")
+            case .error:
+                Text("Retry")
                     .font(.caption)
-                    .foregroundStyle(.red)
-                    .help(message)
+                    .foregroundStyle(.orange)
             }
         }
     }

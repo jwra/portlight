@@ -11,5 +11,12 @@ struct PortLightApp: App {
             Image(systemName: connectionManager.menuBarIcon)
         }
         .menuBarExtraStyle(.window)
+
+        Window("Manage Connections", id: "manage-connections") {
+            ManageConnectionsView(configManager: connectionManager.configManager)
+        }
+        .windowStyle(.titleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 }

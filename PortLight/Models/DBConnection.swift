@@ -1,15 +1,33 @@
 import Foundation
 
 struct DBConnection: Codable, Identifiable, Equatable {
+    /// Unique identifier for this connection (auto-generated if not provided)
+    var id: String
     var name: String
-    let instanceConnectionName: String
+    var instanceConnectionName: String
     var port: Int
-    var autoConnect: Bool = false
-
-    var id: String { instanceConnectionName }
+    var autoConnect: Bool
 
     var displayPort: String {
         "localhost:\(port)"
+    }
+
+    init(id: String = UUID().uuidString, name: String, instanceConnectionName: String, port: Int, autoConnect: Bool = false) {
+        self.id = id
+        self.name = name
+        self.instanceConnectionName = instanceConnectionName
+        self.port = port
+        self.autoConnect = autoConnect
+    }
+
+    // Custom decoding to handle configs without 'id' field (backward compatibility)
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        self.name = try container.decode(String.self, forKey: .name)
+        self.instanceConnectionName = try container.decode(String.self, forKey: .instanceConnectionName)
+        self.port = try container.decode(Int.self, forKey: .port)
+        self.autoConnect = try container.decodeIfPresent(Bool.self, forKey: .autoConnect) ?? false
     }
 
     func requiresReconnect(comparedTo old: DBConnection) -> Bool {

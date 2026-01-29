@@ -6,8 +6,12 @@ final class ConnectionManager {
     var config: AppConfig = AppConfig.defaultConfig
     var statuses: [String: ConnectionStatus] = [:]
 
+    /// The most recent error (connection name and message)
+    var lastError: (connectionName: String, message: String)?
+
     private var processes: [String: Process] = [:]
     private var errorPipes: [String: Pipe] = [:]
+    private var stderrBuffers: [String: String] = [:]  // Buffers stderr output per connection
     private var readinessChecks: [String: DispatchWorkItem] = [:]
     private let logger = Logger(subsystem: "net.jwra.PortLight", category: "ConnectionManager")
     let configManager: ConfigManager
@@ -36,6 +40,15 @@ final class ConnectionManager {
 
     init(configManager: ConfigManager = ConfigManager()) {
         self.configManager = configManager
+        setupConfigObserver()
+    }
+
+    private func setupConfigObserver() {
+        configManager.onConnectionsChanged = { [weak self] in
+            DispatchQueue.main.async {
+                self?.reloadConfig()
+            }
+        }
     }
 
     func setup() {
@@ -55,15 +68,15 @@ final class ConnectionManager {
         let oldById = Dictionary(uniqueKeysWithValues: oldConfig.connections.map { ($0.id, $0) })
         let newById = Dictionary(uniqueKeysWithValues: newConfig.connections.map { ($0.id, $0) })
 
-        // Disconnect removed connections
+        // Collect processes that need to be terminated
+        var processesToTerminate: [(id: String, process: Process)] = []
+
+        // Find removed connections
         for (id, _) in oldById where newById[id] == nil {
             stateQueue.sync {
                 cancelReadinessCheckUnsafe(for: id)
                 if let process = processes[id] {
-                    process.terminate()
-                    process.waitUntilExit()
-                    processes.removeValue(forKey: id)
-                    errorPipes.removeValue(forKey: id)
+                    processesToTerminate.append((id: id, process: process))
                 }
             }
             statuses.removeValue(forKey: id)
@@ -77,10 +90,7 @@ final class ConnectionManager {
                     stateQueue.sync {
                         cancelReadinessCheckUnsafe(for: id)
                         if let process = processes[id] {
-                            process.terminate()
-                            process.waitUntilExit()
-                            processes.removeValue(forKey: id)
-                            errorPipes.removeValue(forKey: id)
+                            processesToTerminate.append((id: id, process: process))
                         }
                     }
                     statuses[id] = .disconnected
@@ -89,6 +99,28 @@ final class ConnectionManager {
             } else {
                 // New connection
                 statuses[id] = .disconnected
+            }
+        }
+
+        // Terminate processes and wait on background thread
+        if !processesToTerminate.isEmpty {
+            // Terminate all first (non-blocking)
+            for (_, process) in processesToTerminate {
+                process.terminate()
+            }
+
+            // Wait for exits and cleanup on background thread
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                for (_, process) in processesToTerminate {
+                    process.waitUntilExit()
+                }
+
+                self?.stateQueue.sync {
+                    for (id, _) in processesToTerminate {
+                        self?.processes.removeValue(forKey: id)
+                        self?.cleanupPipeUnsafe(for: id)
+                    }
+                }
             }
         }
 
@@ -179,25 +211,44 @@ final class ConnectionManager {
 
     func disconnect(_ connection: DBConnection) {
         logger.info("Disconnecting: \(connection.name)")
+        let connectionId = connection.id
 
         let process: Process? = stateQueue.sync {
-            cancelReadinessCheckUnsafe(for: connection.id)
-            return processes[connection.id]
+            cancelReadinessCheckUnsafe(for: connectionId)
+            return processes[connectionId]
         }
 
         guard let process else {
-            setStatus(.disconnected, for: connection.id)
+            setStatus(.disconnected, for: connectionId)
             return
         }
 
+        // Terminate the process
         process.terminate()
-        process.waitUntilExit()
 
-        stateQueue.sync {
-            processes.removeValue(forKey: connection.id)
-            errorPipes.removeValue(forKey: connection.id)
+        // Wait for exit on background thread to avoid blocking main thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            process.waitUntilExit()
+
+            self?.stateQueue.sync {
+                self?.processes.removeValue(forKey: connectionId)
+                self?.cleanupPipeUnsafe(for: connectionId)
+            }
+
+            DispatchQueue.main.async {
+                guard let self else {
+                    Logger(subsystem: "net.jwra.PortLight", category: "ConnectionManager")
+                        .warning("Self deallocated during disconnect for \(connectionId)")
+                    return
+                }
+                // Only set to disconnected if not already in error state from termination handler
+                if case .error = self.statuses[connectionId] {
+                    // Keep error state
+                } else {
+                    self.setStatus(.disconnected, for: connectionId)
+                }
+            }
         }
-        setStatus(.disconnected, for: connection.id)
     }
 
     func disconnectAll() {
@@ -209,32 +260,32 @@ final class ConnectionManager {
             return procs
         }
 
-        for process in allProcesses {
-            process.terminate()
-            process.waitUntilExit()
-        }
-
-        stateQueue.sync {
-            processes.removeAll()
-            errorPipes.removeAll()
-        }
-
+        // Set all statuses to disconnected immediately for responsive UI
         for key in statuses.keys {
             statuses[key] = .disconnected
+        }
+
+        // Terminate all processes
+        for process in allProcesses {
+            process.terminate()
+        }
+
+        // Wait for exits on background thread to avoid blocking main thread
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            for process in allProcesses {
+                process.waitUntilExit()
+            }
+
+            self?.stateQueue.sync {
+                self?.processes.removeAll()
+                self?.cleanupAllPipesUnsafe()
+            }
         }
     }
 
     func shutdown() {
         logger.info("Shutting down all connections")
         disconnectAll()
-    }
-
-    func openConfig() {
-        configManager.openConfigInEditor()
-    }
-
-    func revealConfig() {
-        configManager.revealConfigInFinder()
     }
 
     private func initializeStatuses() {
@@ -264,51 +315,263 @@ final class ConnectionManager {
     private func setStatus(_ status: ConnectionStatus, for connectionId: String) {
         DispatchQueue.main.async {
             self.statuses[connectionId] = status
+
+            // Track the most recent error
+            if case .error(let message) = status {
+                let connectionName = self.config.connections.first { $0.id == connectionId }?.name ?? connectionId
+                self.lastError = (connectionName: connectionName, message: message)
+            }
         }
+    }
+
+    /// Clears the last error banner
+    func clearError() {
+        lastError = nil
     }
 
     private func handleProcessTermination(_ process: Process, connectionId: String) {
         let exitCode = process.terminationStatus
 
-        stateQueue.sync {
+        // Get the buffered stderr and clean up state
+        // Do this in a single sync block to avoid race conditions
+        let finalStderr: String = stateQueue.sync {
+            // Clear the handler first to stop callbacks
+            if let pipe = errorPipes[connectionId] {
+                pipe.fileHandleForReading.readabilityHandler = nil
+            }
+
+            // Get the buffered output
+            let buffer = stderrBuffers[connectionId] ?? ""
+
+            // Clean up all state for this connection
+            stderrBuffers.removeValue(forKey: connectionId)
             processes.removeValue(forKey: connectionId)
             errorPipes.removeValue(forKey: connectionId)
+
+            return buffer
         }
 
         // Handle clean termination: exit code 0, 15 (raw SIGTERM), or 143 (128 + SIGTERM)
         let isCleanExit = exitCode == 0 || exitCode == 15 || exitCode == 143
         if !isCleanExit {
-            setStatus(.error("Exited with code \(exitCode)"), for: connectionId)
+            // Try to extract a meaningful error message from stderr
+            var errorMessage = "Connection failed (exit code \(exitCode))"
+            if !finalStderr.isEmpty {
+                // Log the raw error for debugging
+                logger.error("Proxy stderr for \(connectionId): \(finalStderr)")
+
+                // Convert to user-friendly message
+                errorMessage = userFriendlyError(from: finalStderr)
+            }
             logger.error("Proxy for \(connectionId) exited with code \(exitCode)")
+            setStatus(.error(errorMessage), for: connectionId)
         } else {
             setStatus(.disconnected, for: connectionId)
         }
     }
 
     private func monitorStderr(_ pipe: Pipe, for connectionId: String) {
+        // Initialize stderr buffer
+        stateQueue.sync {
+            stderrBuffers[connectionId] = ""
+        }
+
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            guard let self else { return }
+
             let data = handle.availableData
             guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
 
-            if output.lowercased().contains("error") || output.lowercased().contains("failed") {
-                DispatchQueue.main.async {
-                    let message = self?.extractErrorMessage(from: output) ?? "Connection failed"
-                    self?.setStatus(.error(message), for: connectionId)
+            // Buffer all stderr output for later use in termination handler
+            self.stateQueue.sync {
+                self.stderrBuffers[connectionId, default: ""] += output
+            }
+
+            // Also check for errors immediately for responsive feedback
+            if self.parseProxyError(from: output) != nil {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    // Only set error if still in connecting/connected state
+                    let currentStatus = self.statuses[connectionId]
+                    if case .connecting = currentStatus {
+                        let friendlyMessage = self.userFriendlyError(from: output)
+                        self.setStatus(.error(friendlyMessage), for: connectionId)
+                    } else if case .connected = currentStatus {
+                        let friendlyMessage = self.userFriendlyError(from: output)
+                        self.setStatus(.error(friendlyMessage), for: connectionId)
+                    }
                 }
             }
         }
     }
 
-    private func extractErrorMessage(from output: String) -> String {
+    /// Parses cloud-sql-proxy stderr output for actual errors, avoiding false positives
+    /// Returns nil if no real error is detected
+    private func parseProxyError(from output: String) -> String? {
         let lines = output.components(separatedBy: .newlines)
+
         for line in lines {
-            let lower = line.lowercased()
-            if lower.contains("error") || lower.contains("failed") {
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                return trimmed.count > 100 ? String(trimmed.prefix(100)) + "..." : trimmed
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.isEmpty else { continue }
+
+            // Check for false positive patterns first
+            let lower = trimmed.lowercased()
+            if isFalsePositive(lower) {
+                continue
+            }
+
+            // Check for known error patterns from cloud-sql-proxy
+            if let errorMessage = extractKnownErrorPattern(from: trimmed, lowercase: lower) {
+                return truncateMessage(errorMessage)
             }
         }
-        return String(output.prefix(100)).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return nil
+    }
+
+    /// Checks if the line is a false positive (contains "error" but isn't actually an error)
+    private func isFalsePositive(_ lowercaseLine: String) -> Bool {
+        let falsePositivePatterns = [
+            "error recovery",
+            "no error",
+            "errors: 0",
+            "without error",
+            "error-free",
+            "error count: 0",
+            "0 errors",
+            "recovered from error",
+            "error handling",
+        ]
+        return falsePositivePatterns.contains { lowercaseLine.contains($0) }
+    }
+
+    /// Extracts error message from known cloud-sql-proxy error patterns
+    /// Returns the line if it matches an error pattern, nil otherwise
+    private func extractKnownErrorPattern(from line: String, lowercase: String) -> String? {
+        // Pattern 1: Explicit ERROR/FATAL prefix (common log format)
+        let prefixPatterns = ["error:", "fatal:", "err:"]
+        for prefix in prefixPatterns {
+            if lowercase.hasPrefix(prefix) {
+                return line  // Return full line, let userFriendlyError handle extraction
+            }
+        }
+
+        // Pattern 2: Bracketed log level - just check for presence
+        if lowercase.contains("[error]") || lowercase.contains("[fatal]") || lowercase.contains("[err]") {
+            return line
+        }
+
+        // Pattern 3: Specific cloud-sql-proxy error indicators
+        let errorIndicators = [
+            "terminal error",
+            "unable to start",
+            "credentials",
+            "could not find default credentials",
+            "invalid instance",
+            "instance not found",
+            "project not found",
+            "failed to refresh",
+            "failed to create",
+            "error initializing",
+            "connection refused",
+            "connection reset",
+            "connection timed out",
+            "unable to connect",
+            "cannot connect",
+            "dial tcp",
+            "no such host",
+            "name resolution",
+            "permission denied",
+            "authentication failed",
+            "auth failed",
+            "unauthorized",
+            "forbidden",
+            "certificate",
+            "tls handshake",
+        ]
+
+        for indicator in errorIndicators {
+            if lowercase.contains(indicator) {
+                return line
+            }
+        }
+
+        // Pattern 4: Generic "failed" with error context
+        if lowercase.contains("failed to") || lowercase.contains("has failed") ||
+           lowercase.contains("connection failed") || lowercase.contains("proxy failed") {
+            return line
+        }
+
+        return nil
+    }
+
+    private func truncateMessage(_ message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count > 120 ? String(trimmed.prefix(117)) + "..." : trimmed
+    }
+
+    /// Converts raw proxy errors into user-friendly messages with actionable guidance
+    private func userFriendlyError(from rawError: String) -> String {
+        let lower = rawError.lowercased()
+
+        // Credential errors
+        if lower.contains("could not find default credentials") ||
+           lower.contains("credentials") && lower.contains("not found") ||
+           lower.contains("failed to create default credentials") {
+            return "GCP credentials not configured. Run 'gcloud auth application-default login' in Terminal."
+        }
+
+        // Instance not found
+        if lower.contains("instance not found") || lower.contains("invalid instance") {
+            return "Instance not found. Check your instance connection name format (project:region:instance)."
+        }
+
+        // Project not found
+        if lower.contains("project not found") {
+            return "GCP project not found. Verify the project ID in your instance connection name."
+        }
+
+        // Permission errors
+        if lower.contains("permission denied") || lower.contains("forbidden") ||
+           lower.contains("unauthorized") || lower.contains("iam") {
+            return "Permission denied. Ensure your account has Cloud SQL Client role."
+        }
+
+        // Authentication errors
+        if lower.contains("authentication failed") || lower.contains("auth failed") ||
+           lower.contains("token") && lower.contains("expired") {
+            return "Authentication failed. Try running 'gcloud auth application-default login' again."
+        }
+
+        // Network/connection errors
+        if lower.contains("connection refused") {
+            return "Connection refused. Check if the Cloud SQL instance is running."
+        }
+        if lower.contains("connection timed out") || lower.contains("deadline exceeded") {
+            return "Connection timed out. Check your network connection and firewall settings."
+        }
+        if lower.contains("no such host") || lower.contains("name resolution") {
+            return "DNS resolution failed. Check your network connection."
+        }
+
+        // Port in use
+        if lower.contains("address already in use") || lower.contains("bind") && lower.contains("use") {
+            return "Port already in use. Choose a different local port."
+        }
+
+        // TLS/Certificate errors
+        if lower.contains("certificate") || lower.contains("tls") || lower.contains("ssl") {
+            return "TLS/certificate error. This may indicate a network proxy or firewall issue."
+        }
+
+        // API not enabled
+        if lower.contains("api") && lower.contains("not enabled") ||
+           lower.contains("sqladmin") && lower.contains("enabled") {
+            return "Cloud SQL Admin API not enabled. Enable it in the GCP Console."
+        }
+
+        // If no specific pattern matched, return a cleaned-up version of the original
+        return truncateMessage(rawError)
     }
 
     private func isPortAvailable(_ port: Int) -> Bool {
@@ -371,10 +634,15 @@ final class ConnectionManager {
         guard shouldContinue else { return }
 
         // Check if we're still in connecting state (might have errored via stderr)
-        // This read is on main queue data, but ConnectionStatus is value type so reading is safe
-        if case .connecting = statuses[connectionId] {
-            // Continue checking
-        } else {
+        // Must check on main thread since statuses is @Observable
+        var isStillConnecting = false
+        DispatchQueue.main.sync {
+            if case .connecting = statuses[connectionId] {
+                isStillConnecting = true
+            }
+        }
+
+        guard isStillConnecting else {
             stateQueue.sync {
                 readinessChecks.removeValue(forKey: connectionId)
             }
@@ -470,5 +738,26 @@ final class ConnectionManager {
     private func cancelReadinessCheckUnsafe(for connectionId: String) {
         readinessChecks[connectionId]?.cancel()
         readinessChecks.removeValue(forKey: connectionId)
+    }
+
+    /// Cleans up pipe by clearing handler before removal to prevent callbacks after termination.
+    /// Must be called while holding stateQueue lock.
+    private func cleanupPipeUnsafe(for connectionId: String) {
+        if let pipe = errorPipes[connectionId] {
+            // Clear the handler first to prevent any further callbacks
+            pipe.fileHandleForReading.readabilityHandler = nil
+            errorPipes.removeValue(forKey: connectionId)
+        }
+        stderrBuffers.removeValue(forKey: connectionId)
+    }
+
+    /// Cleans up all pipes by clearing handlers before removal.
+    /// Must be called while holding stateQueue lock.
+    private func cleanupAllPipesUnsafe() {
+        for (_, pipe) in errorPipes {
+            pipe.fileHandleForReading.readabilityHandler = nil
+        }
+        errorPipes.removeAll()
+        stderrBuffers.removeAll()
     }
 }
