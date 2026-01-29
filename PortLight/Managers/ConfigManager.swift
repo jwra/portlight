@@ -8,6 +8,9 @@ final class ConfigManager {
     private let fileManager = FileManager.default
     private var didLogFallback = false
 
+    /// Last validation result from config loading
+    private(set) var lastValidationResult: ConfigValidationResult?
+
     var configURL: URL {
         configDirectoryURL.appendingPathComponent("config.json")
     }
@@ -38,10 +41,29 @@ final class ConfigManager {
             let data = try Data(contentsOf: configURL)
             let config = try JSONDecoder().decode(AppConfig.self, from: data)
             logger.info("Loaded config with \(config.connections.count) connections")
+
+            // Validate and log issues
+            let validation = config.validate()
+            lastValidationResult = validation
+            logValidationIssues(validation)
+
             return config
         } catch {
             logger.error("Failed to load config: \(error.localizedDescription)")
+            lastValidationResult = nil
             return AppConfig.defaultConfig
+        }
+    }
+
+    private func logValidationIssues(_ result: ConfigValidationResult) {
+        for error in result.allErrors {
+            logger.error("Config error [\(error.field)]: \(error.message)")
+        }
+        for warning in result.allWarnings {
+            logger.warning("Config warning [\(warning.field)]: \(warning.message)")
+        }
+        if result.isValid && !result.hasWarnings {
+            logger.info("Config validation passed")
         }
     }
 

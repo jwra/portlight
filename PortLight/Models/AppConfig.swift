@@ -19,4 +19,72 @@ struct AppConfig: Codable {
             ]
         )
     }
+
+    func validate() -> ConfigValidationResult {
+        var issues: [String: [ValidationIssue]] = [:]
+
+        // Validate binary path
+        var binaryIssues: [ValidationIssue] = []
+        if binaryPath.trimmingCharacters(in: .whitespaces).isEmpty {
+            binaryIssues.append(.error("Binary path cannot be empty", field: "binaryPath"))
+        } else if !FileManager.default.fileExists(atPath: binaryPath) {
+            binaryIssues.append(.error("Binary not found at \(binaryPath)", field: "binaryPath"))
+        } else if !FileManager.default.isExecutableFile(atPath: binaryPath) {
+            binaryIssues.append(.error("Binary at \(binaryPath) is not executable", field: "binaryPath"))
+        }
+        if !binaryIssues.isEmpty {
+            issues["binaryPath"] = binaryIssues
+        }
+
+        // Validate connections
+        if connections.isEmpty {
+            issues["connections"] = [.warning("No connections configured", field: "connections")]
+        }
+
+        // Validate each connection
+        for connection in connections {
+            let connectionIssues = connection.validate()
+            if !connectionIssues.isEmpty {
+                issues[connection.id] = connectionIssues
+            }
+        }
+
+        // Check for duplicate ports
+        let duplicates = Dictionary(grouping: connections, by: { $0.port })
+            .filter { $1.count > 1 }
+        for (port, conns) in duplicates {
+            let names = conns.map { $0.name }.joined(separator: ", ")
+            for conn in conns {
+                var existing = issues[conn.id] ?? []
+                existing.append(.error("Port \(port) is used by multiple connections: \(names)", field: "port"))
+                issues[conn.id] = existing
+            }
+        }
+
+        return ConfigValidationResult(issues: issues)
+    }
+}
+
+struct ConfigValidationResult {
+    let issues: [String: [ValidationIssue]]
+
+    var isValid: Bool {
+        !issues.values.flatMap { $0 }.contains { $0.isError }
+    }
+
+    var hasWarnings: Bool {
+        issues.values.flatMap { $0 }.contains { !$0.isError }
+    }
+
+    var allErrors: [ValidationIssue] {
+        issues.values.flatMap { $0 }.filter { $0.isError }
+    }
+
+    var allWarnings: [ValidationIssue] {
+        issues.values.flatMap { $0 }.filter { !$0.isError }
+    }
+
+    func issues(for connectionId: String) -> [ValidationIssue] {
+        issues[connectionId] ?? []
+    }
 }
