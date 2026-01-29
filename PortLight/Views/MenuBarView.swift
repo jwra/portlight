@@ -122,6 +122,8 @@ struct MenuBarView: View {
     private var actions: some View {
         VStack(alignment: .leading, spacing: 0) {
             MenuButton(title: "Manage Connections...", icon: "slider.horizontal.3") {
+                // macOS WindowGroup with matching ID brings existing window to front
+                // if already open, rather than creating multiple instances
                 openWindow(id: "manage-connections")
             }
 

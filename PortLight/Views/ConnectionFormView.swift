@@ -47,6 +47,17 @@ struct ConnectionFormView: View {
         validationIssues.filter { $0.field == "port" }
     }
 
+    /// Warning message when the port is already used by another connection.
+    /// This is a warning (not error) because only one connection can be active at a time.
+    private var portConflictWarning: String? {
+        guard let portValue = Int(port), portValue > 0 else { return nil }
+        let otherConnections = configManager.connections.filter { $0.id != connectionId }
+        if otherConnections.contains(where: { $0.port == portValue }) {
+            return "Port \(portValue) is used by another connection. Only one can be active at a time."
+        }
+        return nil
+    }
+
     private var hasErrors: Bool {
         validationIssues.contains { $0.isError }
     }
@@ -139,6 +150,16 @@ struct ConnectionFormView: View {
                         port = newValue.filter { $0.isNumber }
                     }
                 issueMessages(for: portIssues)
+                // Show warning if port is used by another connection
+                if let warning = portConflictWarning {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.caption)
+                        Text(warning)
+                            .font(.caption)
+                    }
+                    .foregroundStyle(.orange)
+                }
             }
 
             // Auto-connect toggle
