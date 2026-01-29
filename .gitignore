@@ -1,0 +1,6 @@
+mock-proxy
+CLAUDE.MD
+
+# Xcode user-specific data (don't commit)                                                                                                     
+*.xcodeproj/xcuserdata/                                                                                                                       
+*.xcodeproj/project.xcworkspace/xcuserdata/   
