@@ -110,23 +110,38 @@ final class ConnectionManager {
             }
         }
 
-        // Terminate processes and wait on background thread
+        // Terminate processes and wait on background thread with SIGKILL fallback
         if !processesToTerminate.isEmpty {
             // Terminate all first (non-blocking)
             for (_, process) in processesToTerminate {
                 process.terminate()
             }
 
-            // Wait for exits and cleanup on background thread
+            // Wait for exits on background thread with SIGKILL fallback if needed
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                for (_, process) in processesToTerminate {
-                    process.waitUntilExit()
+                guard let self else { return }
+
+                for (id, process) in processesToTerminate {
+                    let pid = process.processIdentifier
+                    let semaphore = DispatchSemaphore(value: 0)
+
+                    DispatchQueue.global(qos: .utility).async {
+                        process.waitUntilExit()
+                        semaphore.signal()
+                    }
+
+                    let result = semaphore.wait(timeout: .now() + self.terminationTimeoutSeconds)
+                    if result == .timedOut {
+                        self.logger.warning("Process \(pid) for connection \(id) did not exit gracefully during config reload, sending SIGKILL")
+                        kill(pid, SIGKILL)
+                        process.waitUntilExit()
+                    }
                 }
 
-                self?.stateQueue.sync {
+                self.stateQueue.sync {
                     for (id, _) in processesToTerminate {
-                        self?.processes.removeValue(forKey: id)
-                        self?.cleanupPipeUnsafe(for: id)
+                        self.processes.removeValue(forKey: id)
+                        self.cleanupPipeUnsafe(for: id)
                     }
                 }
             }
