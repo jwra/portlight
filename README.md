@@ -17,9 +17,29 @@ A macOS menu bar app for managing Cloud SQL Proxy connections.
 
 ## Installation
 
-1. Download the latest release
-2. Move PortLight.app to your Applications folder
+### Quick Install (Terminal)
+
+```bash
+curl -L -o PortLight.dmg https://github.com/jwra/portlight/releases/latest/download/PortLight.dmg && open PortLight.dmg
+```
+
+Then drag PortLight to your Applications folder.
+
+### Manual Install
+
+1. Download `PortLight.dmg` from the [latest release](https://github.com/jwra/portlight/releases/latest)
+2. Open the DMG and drag PortLight to your Applications folder
 3. Launch PortLight from Applications
+
+### First Launch
+
+Since the app is not notarized, macOS will show a security warning on first launch:
+
+1. Right-click (or Control-click) on PortLight in Applications
+2. Select "Open" from the context menu
+3. Click "Open" in the dialog that appears
+
+This is only required once.
 
 ## Configuration
 
