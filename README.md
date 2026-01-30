@@ -2,6 +2,10 @@
 
 A macOS menu bar app for managing Cloud SQL Proxy connections.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="PortLight Screenshot" width="400">
+</p>
+
 ## Features
 
 - Menu bar interface for quick connection management
