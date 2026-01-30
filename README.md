@@ -6,6 +6,8 @@ A macOS menu bar app for managing Cloud SQL Proxy connections.
   <img src="assets/screenshot.png" alt="PortLight Screenshot" width="400">
 </p>
 
+> While this may seem ever so slightly unnecessary, I'm jumping between connections a lot and need something dead simple. I am happy to replace juggling terminals, forgetting where or what I'm connected to, with a 1-2 click solution.
+
 ## Features
 
 - Menu bar interface for quick connection management
