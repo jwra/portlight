@@ -159,7 +159,12 @@ struct MenuBarView: View {
     private var quitButton: some View {
         MenuButton(title: "Quit PortLight", icon: "power") {
             manager.shutdown()
-            NSApplication.shared.terminate(nil)
+            // Give processes a moment to exit gracefully before terminating.
+            // shutdown() sends SIGTERM; this delay allows clean exit without
+            // waiting for the full 5-second SIGKILL timeout.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NSApplication.shared.terminate(nil)
+            }
         }
         .keyboardShortcut("q")
     }

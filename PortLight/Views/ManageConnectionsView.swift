@@ -138,7 +138,7 @@ struct ManageConnectionsView: View {
             // Validation message for binary path
             if let result = configManager.lastValidationResult,
                let issues = result.issues["binaryPath"] {
-                ForEach(issues, id: \.message) { issue in
+                ForEach(Array(issues.enumerated()), id: \.offset) { _, issue in
                     HStack(spacing: 4) {
                         Image(systemName: issue.isError ? "exclamationmark.triangle.fill" : "exclamationmark.circle.fill")
                             .font(.caption)

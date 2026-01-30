@@ -170,7 +170,7 @@ struct ConnectionFormView: View {
 
     @ViewBuilder
     private func issueMessages(for issues: [ValidationIssue]) -> some View {
-        ForEach(issues, id: \.message) { issue in
+        ForEach(Array(issues.enumerated()), id: \.offset) { _, issue in
             HStack(spacing: 4) {
                 Image(systemName: issue.isError ? "exclamationmark.triangle.fill" : "exclamationmark.circle.fill")
                     .font(.caption)

@@ -166,6 +166,42 @@ final class ConnectionManager {
     func connect(_ connection: DBConnection) {
         logger.info("Connecting: \(connection.name)")
 
+        // Clean up any existing process for this connection (e.g., from a previous failed attempt
+        // where the process may still be running and holding the port)
+        let existingProcess: Process? = stateQueue.sync {
+            cancelReadinessCheckUnsafe(for: connection.id)
+            cleanupPipeUnsafe(for: connection.id)
+            return processes.removeValue(forKey: connection.id)
+        }
+
+        if let existingProcess {
+            let pid = existingProcess.processIdentifier
+
+            if existingProcess.isRunning {
+                logger.info("Terminating existing process \(pid) for \(connection.name) before reconnecting")
+                existingProcess.terminate()
+            } else {
+                logger.info("Waiting for recently exited process \(pid) for \(connection.name)")
+            }
+
+            // Always wait for the process to fully exit so the port is released.
+            // Even if isRunning is false, the OS may not have released resources yet.
+            let semaphore = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .utility).async {
+                existingProcess.waitUntilExit()
+                semaphore.signal()
+            }
+            let result = semaphore.wait(timeout: .now() + terminationTimeoutSeconds)
+            if result == .timedOut {
+                logger.warning("Process \(pid) did not exit gracefully, sending SIGKILL")
+                kill(pid, SIGKILL)
+                existingProcess.waitUntilExit()
+            }
+
+            // Small delay to ensure OS fully releases the port after process exit
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+
         // Pre-connect validation
         let validationIssues = connection.validate()
         let errors = validationIssues.filter { $0.isError }
@@ -191,7 +227,21 @@ final class ConnectionManager {
             return
         }
 
-        if !isPortAvailable(connection.port) {
+        // Check port availability with retry logic to handle brief unavailability
+        // after process cleanup (OS may take a moment to release the socket)
+        var portAvailable = false
+        for attempt in 1...5 {
+            if isPortAvailable(connection.port) {
+                portAvailable = true
+                break
+            }
+            if attempt < 5 {
+                logger.debug("Port \(connection.port) not yet available, retry \(attempt)/5")
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+        }
+
+        if !portAvailable {
             setStatus(.error("Port \(connection.port) in use"), for: connection.id)
             return
         }
@@ -227,6 +277,11 @@ final class ConnectionManager {
 
             waitForProxyReady(connectionId: connection.id, port: connection.port, connectionName: connection.name)
         } catch {
+            // Clean up the pipe and its handler since process failed to start
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+            stateQueue.sync {
+                stderrBuffers.removeValue(forKey: connection.id)
+            }
             setStatus(.error("Failed to start: \(error.localizedDescription)"), for: connection.id)
             logger.error("Failed to start proxy: \(error.localizedDescription)")
         }
@@ -414,7 +469,13 @@ final class ConnectionManager {
 
         // Get the buffered stderr and clean up state
         // Do this in a single sync block to avoid race conditions
-        let finalStderr: String = stateQueue.sync {
+        // Also check if this process is still the active one for this connection
+        let (finalStderr, wasActiveProcess): (String, Bool) = stateQueue.sync {
+            // Check if this terminated process is still the one we're tracking.
+            // If not, a new connection attempt has already started and we shouldn't
+            // update the status (it would overwrite the new attempt's status).
+            let isActiveProcess = processes[connectionId] === process
+
             // Clear the handler first to stop callbacks
             if let pipe = errorPipes[connectionId] {
                 pipe.fileHandleForReading.readabilityHandler = nil
@@ -423,12 +484,20 @@ final class ConnectionManager {
             // Get the buffered output
             let buffer = stderrBuffers[connectionId] ?? ""
 
-            // Clean up all state for this connection
-            stderrBuffers.removeValue(forKey: connectionId)
-            processes.removeValue(forKey: connectionId)
-            errorPipes.removeValue(forKey: connectionId)
+            // Clean up state only if this is still the active process
+            if isActiveProcess {
+                stderrBuffers.removeValue(forKey: connectionId)
+                processes.removeValue(forKey: connectionId)
+                errorPipes.removeValue(forKey: connectionId)
+            }
 
-            return buffer
+            return (buffer, isActiveProcess)
+        }
+
+        // If this process was already replaced by a new connection attempt, don't update status
+        guard wasActiveProcess else {
+            logger.debug("Ignoring termination of replaced process for \(connectionId)")
+            return
         }
 
         // Handle clean termination: exit code 0, 15 (raw SIGTERM), or 143 (128 + SIGTERM)
