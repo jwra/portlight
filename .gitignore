@@ -1,0 +1,26 @@
+# Project-specific
+mock-proxy
+CLAUDE.MD
+
+# macOS
+.DS_Store
+
+# Xcode user-specific data
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# Xcode build artifacts
+DerivedData/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# Claude Code local settings
+.claude/

@@ -1,17 +1,22 @@
-//
-//  PortLightApp.swift
-//  PortLight
-//
-//  Created by Jack Rains on 29.01.26.
-//
-
 import SwiftUI
 
 @main
 struct PortLightApp: App {
+    @State private var connectionManager = ConnectionManager()
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        MenuBarExtra {
+            MenuBarView(manager: connectionManager)
+        } label: {
+            Image(systemName: connectionManager.menuBarIcon)
         }
+        .menuBarExtraStyle(.window)
+
+        Window("Manage Connections", id: "manage-connections") {
+            ManageConnectionsView(configManager: connectionManager.configManager)
+        }
+        .windowStyle(.titleBar)
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 }
