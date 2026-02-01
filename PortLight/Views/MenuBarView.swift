@@ -7,6 +7,7 @@ struct MenuBarView: View {
     @State private var showDisconnectAllConfirmation = false
     @State private var isReloading = false
     @State private var reloadComplete = false
+    @State private var showFullErrorMessage = false
 
     private var validationResult: ConfigValidationResult? {
         manager.configManager.lastValidationResult
@@ -23,7 +24,11 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let error = manager.lastError {
-                errorBanner(name: error.connectionName, message: error.message)
+                errorBanner(
+                    name: error.connectionName,
+                    message: error.message,
+                    fullMessage: error.fullMessage
+                )
                 Divider()
             }
             if hasValidationErrors {
@@ -43,7 +48,7 @@ struct MenuBarView: View {
     }
 
     @ViewBuilder
-    private func errorBanner(name: String, message: String) -> some View {
+    private func errorBanner(name: String, message: String, fullMessage: String?) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(.red)
@@ -51,15 +56,28 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
                     .font(.system(.caption, weight: .medium))
-                Text(message)
+                Text(showFullErrorMessage && fullMessage != nil ? fullMessage! : message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                // Show "Show More/Less" button if message was truncated
+                if fullMessage != nil {
+                    Button(showFullErrorMessage ? "Show Less" : "Show More") {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showFullErrorMessage.toggle()
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+                    .buttonStyle(.plain)
+                }
             }
 
             Spacer()
 
             Button {
+                showFullErrorMessage = false
                 manager.clearError()
             } label: {
                 Image(systemName: "xmark")
