@@ -283,26 +283,46 @@ final class ConnectionManager {
 
         if let conflicting = conflictingProcess {
             logger.info("Waiting for process on port \(connection.port) from \(conflicting.id) to exit")
-            let semaphore = DispatchSemaphore(value: 0)
-            DispatchQueue.global(qos: .utility).async {
-                conflicting.process.waitUntilExit()
-                semaphore.signal()
+            // Show connecting status so user knows something is happening
+            setStatus(.connecting, for: connection.id)
+
+            // Wait for conflicting process on background thread to avoid freezing UI
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+
+                let semaphore = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .utility).async {
+                    conflicting.process.waitUntilExit()
+                    semaphore.signal()
+                }
+                let result = semaphore.wait(timeout: .now() + self.terminationTimeoutSeconds)
+                if result == .timedOut {
+                    self.logger.warning("Conflicting process did not exit in time, sending SIGKILL")
+                    kill(conflicting.process.processIdentifier, SIGKILL)
+                    conflicting.process.waitUntilExit()
+                }
+                // Clean up the conflicting process from our tracking
+                self.stateQueue.sync {
+                    self.processes.removeValue(forKey: conflicting.id)
+                    self.cleanupPipeUnsafe(for: conflicting.id)
+                }
+                // Small delay to ensure OS releases the port
+                Thread.sleep(forTimeInterval: 0.1)
+
+                // Continue connection on main thread
+                DispatchQueue.main.async {
+                    self.finishConnect(connection)
+                }
             }
-            let result = semaphore.wait(timeout: .now() + terminationTimeoutSeconds)
-            if result == .timedOut {
-                logger.warning("Conflicting process did not exit in time, sending SIGKILL")
-                kill(conflicting.process.processIdentifier, SIGKILL)
-                conflicting.process.waitUntilExit()
-            }
-            // Clean up the conflicting process from our tracking
-            stateQueue.sync {
-                processes.removeValue(forKey: conflicting.id)
-                cleanupPipeUnsafe(for: conflicting.id)
-            }
-            // Small delay to ensure OS releases the port
-            Thread.sleep(forTimeInterval: 0.1)
+            return
         }
 
+        // No conflicting process, proceed directly
+        finishConnect(connection)
+    }
+
+    /// Final stage of connection after any port conflicts are resolved.
+    private func finishConnect(_ connection: DBConnection) {
         // Check port availability with retry logic to handle brief unavailability
         // after process cleanup (OS may take a moment to release the socket)
         var portAvailable = false
