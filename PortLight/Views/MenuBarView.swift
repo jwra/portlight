@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
@@ -85,6 +86,7 @@ struct MenuBarView: View {
             }
             Spacer()
             Button("Fix") {
+                NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "manage-connections")
             }
             .buttonStyle(.bordered)
@@ -122,6 +124,8 @@ struct MenuBarView: View {
     private var actions: some View {
         VStack(alignment: .leading, spacing: 0) {
             MenuButton(title: "Manage Connections...", icon: "slider.horizontal.3") {
+                // Activate the app to bring windows to front (menu bar apps run in background)
+                NSApp.activate(ignoringOtherApps: true)
                 // macOS WindowGroup with matching ID brings existing window to front
                 // if already open, rather than creating multiple instances
                 openWindow(id: "manage-connections")
