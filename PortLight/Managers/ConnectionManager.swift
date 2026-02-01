@@ -31,6 +31,9 @@ final class ConnectionManager {
     /// Timeout for socket connection attempt during port readiness check (milliseconds).
     /// 50ms is chosen to be responsive without excessive CPU usage during polling.
     private let socketConnectTimeoutMs: Int32 = 50
+    /// Maximum size for stderr buffer per connection (bytes).
+    /// Prevents unbounded memory growth for long-running connections with verbose logging.
+    private let maxStderrBufferSize = 64 * 1024  // 64 KB
 
     var hasActiveConnections: Bool {
         statuses.values.contains { $0.isActive }
@@ -581,12 +584,20 @@ final class ConnectionManager {
             let data = handle.availableData
             guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
 
-            // Buffer all stderr output for later use in termination handler.
+            // Buffer stderr output for later use in termination handler.
             // Double-check pipe validity inside the lock since termination could
             // have started cleanup between the first check and this write.
+            // Limit buffer size to prevent unbounded memory growth.
             self.stateQueue.sync {
                 guard self.errorPipes[connectionId] != nil else { return }
-                self.stderrBuffers[connectionId, default: ""] += output
+                var buffer = self.stderrBuffers[connectionId, default: ""]
+                buffer += output
+                // Truncate from the beginning if buffer exceeds max size, keeping recent output
+                if buffer.count > self.maxStderrBufferSize {
+                    let excess = buffer.count - self.maxStderrBufferSize
+                    buffer = String(buffer.dropFirst(excess))
+                }
+                self.stderrBuffers[connectionId] = buffer
             }
 
             // Also check for errors immediately for responsive feedback
