@@ -226,7 +226,7 @@ private struct ConnectionCard: View {
                         .font(.system(.caption, design: .monospaced))
                     Text("→")
                         .foregroundStyle(.tertiary)
-                    Text("localhost:\(connection.port)")
+                    Text("localhost:" + String(connection.port))
                         .font(.system(.caption, design: .monospaced))
                 }
                 .foregroundStyle(.secondary)
