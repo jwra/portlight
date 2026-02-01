@@ -4,6 +4,8 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Bindable var manager: ConnectionManager
     @State private var showDisconnectAllConfirmation = false
+    @State private var isReloading = false
+    @State private var reloadComplete = false
 
     private var validationResult: ConfigValidationResult? {
         manager.configManager.lastValidationResult
@@ -127,8 +129,21 @@ struct MenuBarView: View {
                 openWindow(id: "manage-connections")
             }
 
-            MenuButton(title: "Reload Config", icon: "arrow.clockwise") {
+            ReloadConfigButton(
+                isReloading: $isReloading,
+                reloadComplete: $reloadComplete
+            ) {
+                isReloading = true
                 manager.reloadConfig()
+                // Brief delay to show the spinner, then show checkmark
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    isReloading = false
+                    reloadComplete = true
+                    // Reset the checkmark after a moment
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        reloadComplete = false
+                    }
+                }
             }
 
             if manager.hasActiveConnections {
@@ -182,5 +197,32 @@ private struct MenuButton: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+}
+
+private struct ReloadConfigButton: View {
+    @Binding var isReloading: Bool
+    @Binding var reloadComplete: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isReloading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if reloadComplete {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+                Text(reloadComplete ? "Config Reloaded" : "Reload Config")
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .disabled(isReloading)
     }
 }
