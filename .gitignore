@@ -1,6 +1,11 @@
 # Project-specific
 mock-proxy
 CLAUDE.MD
+local-docs/
+
+# Claude Code
+.agents/
+.claude/
 
 # macOS
 .DS_Store
@@ -14,6 +19,7 @@ CLAUDE.MD
 DerivedData/
 build/
 *.ipa
+*.dmg
 *.dSYM.zip
 *.dSYM
 
@@ -22,5 +28,3 @@ build/
 .build/
 Package.resolved
 
-# Claude Code local settings
-.claude/
