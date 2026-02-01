@@ -112,6 +112,7 @@ struct MenuBarView: View {
                             connection: connection,
                             status: manager.status(for: connection),
                             validationIssues: connectionIssues,
+                            isOperationPending: manager.isOperationPending(for: connection.id),
                             onToggle: { manager.toggle(connection) }
                         )
                     }
