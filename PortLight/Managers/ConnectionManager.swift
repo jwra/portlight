@@ -6,8 +6,11 @@ final class ConnectionManager {
     var config: AppConfig = AppConfig.defaultConfig
     var statuses: [String: ConnectionStatus] = [:]
 
-    /// The most recent error (connection name and message)
-    var lastError: (connectionName: String, message: String)?
+    /// The most recent error (connection name, truncated message for display, and full message if truncated)
+    var lastError: (connectionName: String, message: String, fullMessage: String?)?
+
+    /// Stores the full message when truncation occurs (cleared on next error or clearError)
+    private var pendingFullErrorMessage: String?
 
     private var processes: [String: Process] = [:]
     private var errorPipes: [String: Pipe] = [:]
@@ -437,7 +440,8 @@ final class ConnectionManager {
             // Track the most recent error
             if case .error(let message) = status {
                 let connectionName = config.connections.first { $0.id == connectionId }?.name ?? connectionId
-                lastError = (connectionName: connectionName, message: message)
+                lastError = (connectionName: connectionName, message: message, fullMessage: pendingFullErrorMessage)
+                pendingFullErrorMessage = nil  // Clear after use
             }
         } else {
             DispatchQueue.main.async { [weak self] in
@@ -669,8 +673,11 @@ final class ConnectionManager {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let maxLength = 250
         if trimmed.count <= maxLength {
+            pendingFullErrorMessage = nil
             return trimmed
         }
+        // Store full message for later retrieval
+        pendingFullErrorMessage = trimmed
         return String(trimmed.prefix(maxLength - 3)) + "..."
     }
 
