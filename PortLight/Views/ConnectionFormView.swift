@@ -11,6 +11,7 @@ struct ConnectionFormView: View {
     @State private var instanceConnectionName: String = ""
     @State private var port: String = "5432"
     @State private var autoConnect: Bool = false
+    @State private var isSaving: Bool = false
 
     private var isEditing: Bool {
         existingConnection != nil
@@ -150,15 +151,15 @@ struct ConnectionFormView: View {
                         port = newValue.filter { $0.isNumber }
                     }
                 issueMessages(for: portIssues)
-                // Show warning if port is used by another connection
+                // Show info notice if port is used by another connection (not an error, just FYI)
                 if let warning = portConflictWarning {
                     HStack(spacing: 4) {
-                        Image(systemName: "exclamationmark.circle.fill")
+                        Image(systemName: "info.circle.fill")
                             .font(.caption)
                         Text(warning)
                             .font(.caption)
                     }
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.blue)
                 }
             }
 
@@ -188,12 +189,23 @@ struct ConnectionFormView: View {
                 dismiss()
             }
             .keyboardShortcut(.cancelAction)
+            .disabled(isSaving)
 
-            Button(isEditing ? "Save" : "Add") {
+            Button {
                 saveConnection()
+            } label: {
+                if isSaving {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Saving...")
+                    }
+                } else {
+                    Text(isEditing ? "Save" : "Add")
+                }
             }
             .keyboardShortcut(.defaultAction)
-            .disabled(!canSave)
+            .disabled(!canSave || isSaving)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -201,12 +213,21 @@ struct ConnectionFormView: View {
     }
 
     private func saveConnection() {
+        isSaving = true
+
         let connection = currentConnection
         if isEditing {
             configManager.updateConnection(connection)
         } else {
             configManager.addConnection(connection)
         }
-        dismiss()
+
+        // Check if save succeeded (no error set)
+        if configManager.lastSaveError == nil {
+            dismiss()
+        } else {
+            // Save failed - stay open so user can see the error alert from ManageConnectionsView
+            isSaving = false
+        }
     }
 }

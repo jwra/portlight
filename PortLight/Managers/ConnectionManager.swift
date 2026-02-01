@@ -6,8 +6,14 @@ final class ConnectionManager {
     var config: AppConfig = AppConfig.defaultConfig
     var statuses: [String: ConnectionStatus] = [:]
 
-    /// The most recent error (connection name and message)
-    var lastError: (connectionName: String, message: String)?
+    /// The most recent error (connection name, truncated message for display, and full message if truncated)
+    var lastError: (connectionName: String, message: String, fullMessage: String?)?
+
+    /// Stores the full message when truncation occurs (cleared on next error or clearError)
+    private var pendingFullErrorMessage: String?
+
+    /// Connections currently being toggled (to prevent rapid re-entry)
+    private(set) var pendingOperations: Set<String> = []
 
     private var processes: [String: Process] = [:]
     private var errorPipes: [String: Pipe] = [:]
@@ -28,6 +34,9 @@ final class ConnectionManager {
     /// Timeout for socket connection attempt during port readiness check (milliseconds).
     /// 50ms is chosen to be responsive without excessive CPU usage during polling.
     private let socketConnectTimeoutMs: Int32 = 50
+    /// Maximum size for stderr buffer per connection (bytes).
+    /// Prevents unbounded memory growth for long-running connections with verbose logging.
+    private let maxStderrBufferSize = 64 * 1024  // 64 KB
 
     var hasActiveConnections: Bool {
         statuses.values.contains { $0.isActive }
@@ -155,7 +164,18 @@ final class ConnectionManager {
         statuses[connection.id] ?? .disconnected
     }
 
+    /// Returns true if a connect/disconnect operation is in progress for this connection
+    func isOperationPending(for connectionId: String) -> Bool {
+        pendingOperations.contains(connectionId)
+    }
+
     func toggle(_ connection: DBConnection) {
+        // Prevent rapid toggling - ignore if operation already in progress
+        guard !pendingOperations.contains(connection.id) else {
+            logger.debug("Toggle ignored for \(connection.name) - operation already in progress")
+            return
+        }
+
         if status(for: connection).isActive {
             disconnect(connection)
         } else {
@@ -165,6 +185,9 @@ final class ConnectionManager {
 
     func connect(_ connection: DBConnection) {
         logger.info("Connecting: \(connection.name)")
+
+        // Mark operation as pending to prevent rapid toggling
+        pendingOperations.insert(connection.id)
 
         // Clean up any existing process for this connection (e.g., from a previous failed attempt
         // where the process may still be running and holding the port)
@@ -184,49 +207,138 @@ final class ConnectionManager {
                 logger.info("Waiting for recently exited process \(pid) for \(connection.name)")
             }
 
-            // Always wait for the process to fully exit so the port is released.
-            // Even if isRunning is false, the OS may not have released resources yet.
-            let semaphore = DispatchSemaphore(value: 0)
-            DispatchQueue.global(qos: .utility).async {
-                existingProcess.waitUntilExit()
-                semaphore.signal()
-            }
-            let result = semaphore.wait(timeout: .now() + terminationTimeoutSeconds)
-            if result == .timedOut {
-                logger.warning("Process \(pid) did not exit gracefully, sending SIGKILL")
-                kill(pid, SIGKILL)
-                existingProcess.waitUntilExit()
-            }
+            // Wait for process to exit on background thread to avoid blocking UI
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
 
-            // Small delay to ensure OS fully releases the port after process exit
-            Thread.sleep(forTimeInterval: 0.1)
+                let semaphore = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .utility).async {
+                    existingProcess.waitUntilExit()
+                    semaphore.signal()
+                }
+                let result = semaphore.wait(timeout: .now() + self.terminationTimeoutSeconds)
+                if result == .timedOut {
+                    self.logger.warning("Process \(pid) did not exit gracefully, sending SIGKILL")
+                    kill(pid, SIGKILL)
+                    existingProcess.waitUntilExit()
+                }
+
+                // Small delay to ensure OS fully releases the port after process exit
+                Thread.sleep(forTimeInterval: 0.1)
+
+                // Continue connection on main thread
+                DispatchQueue.main.async {
+                    self.continueConnect(connection)
+                }
+            }
+        } else {
+            continueConnect(connection)
         }
+    }
 
+    /// Continues the connection process after any existing process cleanup.
+    /// Called directly if no cleanup needed, or from background thread after cleanup completes.
+    private func continueConnect(_ connection: DBConnection) {
         // Pre-connect validation
         let validationIssues = connection.validate()
         let errors = validationIssues.filter { $0.isError }
         if !errors.isEmpty {
             let errorMessage = errors.map { $0.message }.joined(separator: "; ")
             setStatus(.error(errorMessage), for: connection.id)
+            pendingOperations.remove(connection.id)
             logger.error("Validation failed for \(connection.name): \(errorMessage)")
             return
         }
 
         guard FileManager.default.isExecutableFile(atPath: config.binaryPath) else {
             setStatus(.error("cloud-sql-proxy not found at \(config.binaryPath)"), for: connection.id)
+            pendingOperations.remove(connection.id)
             logger.error("Binary not found at: \(self.config.binaryPath)")
             return
         }
 
+        // Check if another connection is actively using this port
         if let conflict = config.connections.first(where: {
             $0.id != connection.id &&
             $0.port == connection.port &&
             statuses[$0.id]?.isActive == true
         }) {
             setStatus(.error("Port \(connection.port) used by \(conflict.name)"), for: connection.id)
+            pendingOperations.remove(connection.id)
             return
         }
 
+        // Check if another connection has a process that might still be holding this port
+        // (e.g., a failed connection that just exited). Wait for it to fully terminate.
+        let conflictingProcess: (id: String, process: Process)? = stateQueue.sync {
+            for (otherId, otherProcess) in processes {
+                if otherId != connection.id,
+                   let otherConnection = config.connections.first(where: { $0.id == otherId }),
+                   otherConnection.port == connection.port {
+                    return (id: otherId, process: otherProcess)
+                }
+            }
+            return nil
+        }
+
+        if let conflicting = conflictingProcess {
+            logger.info("Waiting for process on port \(connection.port) from \(conflicting.id) to exit")
+
+            // Remove the conflicting process from tracking FIRST.
+            // This prevents its termination handler from setting an error status,
+            // since handleProcessTermination checks if the process is still tracked.
+            stateQueue.sync {
+                processes.removeValue(forKey: conflicting.id)
+                cleanupPipeUnsafe(for: conflicting.id)
+            }
+
+            // Clear any existing error from the conflicting connection
+            // (in case termination handler already ran before we got here)
+            if let currentError = lastError, currentError.connectionName == config.connections.first(where: { $0.id == conflicting.id })?.name {
+                lastError = nil
+            }
+
+            // Show connecting status so user knows something is happening
+            setStatus(.connecting, for: connection.id)
+
+            // Wait for conflicting process on background thread to avoid freezing UI
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else { return }
+
+                let semaphore = DispatchSemaphore(value: 0)
+                DispatchQueue.global(qos: .utility).async {
+                    conflicting.process.waitUntilExit()
+                    semaphore.signal()
+                }
+                let result = semaphore.wait(timeout: .now() + self.terminationTimeoutSeconds)
+                if result == .timedOut {
+                    self.logger.warning("Conflicting process did not exit in time, sending SIGKILL")
+                    kill(conflicting.process.processIdentifier, SIGKILL)
+                    conflicting.process.waitUntilExit()
+                }
+
+                // Small delay to ensure OS releases the port
+                Thread.sleep(forTimeInterval: 0.1)
+
+                // Continue connection on main thread
+                DispatchQueue.main.async {
+                    // Clear error again in case termination handler snuck in
+                    if let currentError = self.lastError,
+                       currentError.connectionName == self.config.connections.first(where: { $0.id == conflicting.id })?.name {
+                        self.lastError = nil
+                    }
+                    self.finishConnect(connection)
+                }
+            }
+            return
+        }
+
+        // No conflicting process, proceed directly
+        finishConnect(connection)
+    }
+
+    /// Final stage of connection after any port conflicts are resolved.
+    private func finishConnect(_ connection: DBConnection) {
         // Check port availability with retry logic to handle brief unavailability
         // after process cleanup (OS may take a moment to release the socket)
         var portAvailable = false
@@ -243,10 +355,13 @@ final class ConnectionManager {
 
         if !portAvailable {
             setStatus(.error("Port \(connection.port) in use"), for: connection.id)
+            pendingOperations.remove(connection.id)
             return
         }
 
         setStatus(.connecting, for: connection.id)
+        // Clear pending now - the connection is underway and will complete via termination handler
+        pendingOperations.remove(connection.id)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.binaryPath)
@@ -291,6 +406,9 @@ final class ConnectionManager {
         logger.info("Disconnecting: \(connection.name)")
         let connectionId = connection.id
 
+        // Mark operation as pending to prevent rapid toggling
+        pendingOperations.insert(connectionId)
+
         let process: Process? = stateQueue.sync {
             cancelReadinessCheckUnsafe(for: connectionId)
             return processes[connectionId]
@@ -298,6 +416,7 @@ final class ConnectionManager {
 
         guard let process else {
             setStatus(.disconnected, for: connectionId)
+            pendingOperations.remove(connectionId)
             return
         }
 
@@ -344,6 +463,7 @@ final class ConnectionManager {
                     guard let self else { return }
                     // For manual disconnect, always set to disconnected to clear any error state
                     self.setStatus(.disconnected, for: connectionId)
+                    self.pendingOperations.remove(connectionId)
                 }
             }
         }
@@ -437,7 +557,8 @@ final class ConnectionManager {
             // Track the most recent error
             if case .error(let message) = status {
                 let connectionName = config.connections.first { $0.id == connectionId }?.name ?? connectionId
-                lastError = (connectionName: connectionName, message: message)
+                lastError = (connectionName: connectionName, message: message, fullMessage: pendingFullErrorMessage)
+                pendingFullErrorMessage = nil  // Clear after use
             }
         } else {
             DispatchQueue.main.async { [weak self] in
@@ -539,12 +660,20 @@ final class ConnectionManager {
             let data = handle.availableData
             guard !data.isEmpty, let output = String(data: data, encoding: .utf8) else { return }
 
-            // Buffer all stderr output for later use in termination handler.
+            // Buffer stderr output for later use in termination handler.
             // Double-check pipe validity inside the lock since termination could
             // have started cleanup between the first check and this write.
+            // Limit buffer size to prevent unbounded memory growth.
             self.stateQueue.sync {
                 guard self.errorPipes[connectionId] != nil else { return }
-                self.stderrBuffers[connectionId, default: ""] += output
+                var buffer = self.stderrBuffers[connectionId, default: ""]
+                buffer += output
+                // Truncate from the beginning if buffer exceeds max size, keeping recent output
+                if buffer.count > self.maxStderrBufferSize {
+                    let excess = buffer.count - self.maxStderrBufferSize
+                    buffer = String(buffer.dropFirst(excess))
+                }
+                self.stderrBuffers[connectionId] = buffer
             }
 
             // Also check for errors immediately for responsive feedback
@@ -669,8 +798,11 @@ final class ConnectionManager {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         let maxLength = 250
         if trimmed.count <= maxLength {
+            pendingFullErrorMessage = nil
             return trimmed
         }
+        // Store full message for later retrieval
+        pendingFullErrorMessage = trimmed
         return String(trimmed.prefix(maxLength - 3)) + "..."
     }
 
@@ -860,7 +992,16 @@ final class ConnectionManager {
             return
         }
 
-        // Schedule next poll
+        // Schedule next poll - check cancellation first to avoid unnecessary scheduling
+        let shouldSchedule: Bool = stateQueue.sync {
+            guard let workItem = readinessChecks[connectionId], !workItem.isCancelled else {
+                return false
+            }
+            return true
+        }
+
+        guard shouldSchedule else { return }
+
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + pollIntervalSeconds
         ) { [weak self] in

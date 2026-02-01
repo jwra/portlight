@@ -1,9 +1,15 @@
 import SwiftUI
+import AppKit
 
 struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Bindable var manager: ConnectionManager
     @State private var showDisconnectAllConfirmation = false
+    @State private var isReloading = false
+    @State private var reloadComplete = false
+    @State private var showFullErrorMessage = false
+    @State private var isQuitting = false
+    @FocusState private var focusedConnectionIndex: Int?
 
     private var validationResult: ConfigValidationResult? {
         manager.configManager.lastValidationResult
@@ -17,10 +23,20 @@ struct MenuBarView: View {
         manager.statuses.values.filter { $0.isActive }.count
     }
 
+    private var activeConnectionNames: [String] {
+        manager.config.connections
+            .filter { manager.statuses[$0.id]?.isActive == true }
+            .map { $0.name }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let error = manager.lastError {
-                errorBanner(name: error.connectionName, message: error.message)
+                errorBanner(
+                    name: error.connectionName,
+                    message: error.message,
+                    fullMessage: error.fullMessage
+                )
                 Divider()
             }
             if hasValidationErrors {
@@ -40,7 +56,7 @@ struct MenuBarView: View {
     }
 
     @ViewBuilder
-    private func errorBanner(name: String, message: String) -> some View {
+    private func errorBanner(name: String, message: String, fullMessage: String?) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "exclamationmark.circle.fill")
                 .foregroundStyle(.red)
@@ -48,15 +64,28 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
                     .font(.system(.caption, weight: .medium))
-                Text(message)
+                Text(showFullErrorMessage && fullMessage != nil ? fullMessage! : message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                // Show "Show More/Less" button if message was truncated
+                if fullMessage != nil {
+                    Button(showFullErrorMessage ? "Show Less" : "Show More") {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showFullErrorMessage.toggle()
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+                    .buttonStyle(.plain)
+                }
             }
 
             Spacer()
 
             Button {
+                showFullErrorMessage = false
                 manager.clearError()
             } label: {
                 Image(systemName: "xmark")
@@ -85,6 +114,7 @@ struct MenuBarView: View {
             }
             Spacer()
             Button("Fix") {
+                NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "manage-connections")
             }
             .buttonStyle(.bordered)
@@ -104,31 +134,87 @@ struct MenuBarView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(manager.config.connections) { connection in
+                    ForEach(Array(manager.config.connections.enumerated()), id: \.element.id) { index, connection in
                         let connectionIssues = validationResult?.issues(for: connection.id) ?? []
                         ConnectionRowView(
                             connection: connection,
                             status: manager.status(for: connection),
                             validationIssues: connectionIssues,
+                            isOperationPending: manager.isOperationPending(for: connection.id),
                             onToggle: { manager.toggle(connection) }
                         )
+                        .focused($focusedConnectionIndex, equals: index)
+                        .accessibilityLabel("\(connection.name), \(manager.status(for: connection).accessibilityLabel)")
                     }
                 }
             }
             .frame(maxHeight: 350)
+            .onKeyPress(.upArrow) {
+                navigateConnection(direction: -1)
+                return .handled
+            }
+            .onKeyPress(.downArrow) {
+                navigateConnection(direction: 1)
+                return .handled
+            }
+            .onKeyPress(.return) {
+                toggleFocusedConnection()
+                return .handled
+            }
+            .onKeyPress(.space) {
+                toggleFocusedConnection()
+                return .handled
+            }
         }
+    }
+
+    private func navigateConnection(direction: Int) {
+        let connections = manager.config.connections
+        guard !connections.isEmpty else { return }
+
+        if let current = focusedConnectionIndex {
+            let newIndex = current + direction
+            if newIndex >= 0 && newIndex < connections.count {
+                focusedConnectionIndex = newIndex
+            }
+        } else {
+            // No selection, start from first (down) or last (up)
+            focusedConnectionIndex = direction > 0 ? 0 : connections.count - 1
+        }
+    }
+
+    private func toggleFocusedConnection() {
+        guard let index = focusedConnectionIndex,
+              index < manager.config.connections.count else { return }
+        let connection = manager.config.connections[index]
+        manager.toggle(connection)
     }
 
     private var actions: some View {
         VStack(alignment: .leading, spacing: 0) {
             MenuButton(title: "Manage Connections...", icon: "slider.horizontal.3") {
+                // Activate the app to bring windows to front (menu bar apps run in background)
+                NSApp.activate(ignoringOtherApps: true)
                 // macOS WindowGroup with matching ID brings existing window to front
                 // if already open, rather than creating multiple instances
                 openWindow(id: "manage-connections")
             }
 
-            MenuButton(title: "Reload Config", icon: "arrow.clockwise") {
+            ReloadConfigButton(
+                isReloading: $isReloading,
+                reloadComplete: $reloadComplete
+            ) {
+                isReloading = true
                 manager.reloadConfig()
+                // Brief delay to show the spinner, then show checkmark
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    isReloading = false
+                    reloadComplete = true
+                    // Reset the checkmark after a moment
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        reloadComplete = false
+                    }
+                }
             }
 
             if manager.hasActiveConnections {
@@ -152,12 +238,15 @@ struct MenuBarView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will disconnect \(activeConnectionCount) active connections.")
+            let names = activeConnectionNames.joined(separator: ", ")
+            Text("This will disconnect \(activeConnectionCount) active connections:\n\(names)")
         }
     }
 
     private var quitButton: some View {
-        MenuButton(title: "Quit PortLight", icon: "power") {
+        Button {
+            guard !isQuitting else { return }
+            isQuitting = true
             manager.shutdown()
             // Give processes a moment to exit gracefully before terminating.
             // shutdown() sends SIGTERM; this delay allows clean exit without
@@ -165,8 +254,23 @@ struct MenuBarView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 NSApplication.shared.terminate(nil)
             }
+        } label: {
+            HStack(spacing: 6) {
+                if isQuitting {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Quitting...")
+                } else {
+                    Image(systemName: "power")
+                    Text("Quit PortLight")
+                }
+            }
         }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         .keyboardShortcut("q")
+        .disabled(isQuitting)
     }
 }
 
@@ -182,5 +286,32 @@ private struct MenuButton: View {
         .buttonStyle(.plain)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+}
+
+private struct ReloadConfigButton: View {
+    @Binding var isReloading: Bool
+    @Binding var reloadComplete: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isReloading {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if reloadComplete {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                }
+                Text(reloadComplete ? "Config Reloaded" : "Reload Config")
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .disabled(isReloading)
     }
 }
