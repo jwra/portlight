@@ -4,6 +4,7 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
     @Bindable var manager: ConnectionManager
     @State private var showDisconnectAllConfirmation = false
+    @State private var isQuitting = false
 
     private var validationResult: ConfigValidationResult? {
         manager.configManager.lastValidationResult
@@ -157,7 +158,9 @@ struct MenuBarView: View {
     }
 
     private var quitButton: some View {
-        MenuButton(title: "Quit PortLight", icon: "power") {
+        Button {
+            guard !isQuitting else { return }
+            isQuitting = true
             manager.shutdown()
             // Give processes a moment to exit gracefully before terminating.
             // shutdown() sends SIGTERM; this delay allows clean exit without
@@ -165,8 +168,23 @@ struct MenuBarView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 NSApplication.shared.terminate(nil)
             }
+        } label: {
+            HStack(spacing: 6) {
+                if isQuitting {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Quitting...")
+                } else {
+                    Image(systemName: "power")
+                    Text("Quit PortLight")
+                }
+            }
         }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
         .keyboardShortcut("q")
+        .disabled(isQuitting)
     }
 }
 
