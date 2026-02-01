@@ -151,15 +151,15 @@ struct ConnectionFormView: View {
                         port = newValue.filter { $0.isNumber }
                     }
                 issueMessages(for: portIssues)
-                // Show warning if port is used by another connection
+                // Show info notice if port is used by another connection (not an error, just FYI)
                 if let warning = portConflictWarning {
                     HStack(spacing: 4) {
-                        Image(systemName: "exclamationmark.circle.fill")
+                        Image(systemName: "info.circle.fill")
                             .font(.caption)
                         Text(warning)
                             .font(.caption)
                     }
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.blue)
                 }
             }
 
