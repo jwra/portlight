@@ -30,4 +30,13 @@ enum ConnectionStatus: Equatable {
         default: false
         }
     }
+
+    var accessibilityLabel: String {
+        switch self {
+        case .disconnected: "Disconnected"
+        case .connecting: "Connecting"
+        case .connected: "Connected"
+        case .error(let message): "Error: \(message)"
+        }
+    }
 }
