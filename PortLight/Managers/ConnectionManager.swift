@@ -283,6 +283,21 @@ final class ConnectionManager {
 
         if let conflicting = conflictingProcess {
             logger.info("Waiting for process on port \(connection.port) from \(conflicting.id) to exit")
+
+            // Remove the conflicting process from tracking FIRST.
+            // This prevents its termination handler from setting an error status,
+            // since handleProcessTermination checks if the process is still tracked.
+            stateQueue.sync {
+                processes.removeValue(forKey: conflicting.id)
+                cleanupPipeUnsafe(for: conflicting.id)
+            }
+
+            // Clear any existing error from the conflicting connection
+            // (in case termination handler already ran before we got here)
+            if let currentError = lastError, currentError.connectionName == config.connections.first(where: { $0.id == conflicting.id })?.name {
+                lastError = nil
+            }
+
             // Show connecting status so user knows something is happening
             setStatus(.connecting, for: connection.id)
 
@@ -301,16 +316,17 @@ final class ConnectionManager {
                     kill(conflicting.process.processIdentifier, SIGKILL)
                     conflicting.process.waitUntilExit()
                 }
-                // Clean up the conflicting process from our tracking
-                self.stateQueue.sync {
-                    self.processes.removeValue(forKey: conflicting.id)
-                    self.cleanupPipeUnsafe(for: conflicting.id)
-                }
+
                 // Small delay to ensure OS releases the port
                 Thread.sleep(forTimeInterval: 0.1)
 
                 // Continue connection on main thread
                 DispatchQueue.main.async {
+                    // Clear error again in case termination handler snuck in
+                    if let currentError = self.lastError,
+                       currentError.connectionName == self.config.connections.first(where: { $0.id == conflicting.id })?.name {
+                        self.lastError = nil
+                    }
                     self.finishConnect(connection)
                 }
             }
