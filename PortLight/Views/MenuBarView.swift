@@ -21,6 +21,12 @@ struct MenuBarView: View {
         manager.statuses.values.filter { $0.isActive }.count
     }
 
+    private var activeConnectionNames: [String] {
+        manager.config.connections
+            .filter { manager.statuses[$0.id]?.isActive == true }
+            .map { $0.name }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let error = manager.lastError {
@@ -190,7 +196,8 @@ struct MenuBarView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This will disconnect \(activeConnectionCount) active connections.")
+            let names = activeConnectionNames.joined(separator: ", ")
+            Text("This will disconnect \(activeConnectionCount) active connections:\n\(names)")
         }
     }
 
