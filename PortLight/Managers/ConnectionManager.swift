@@ -257,6 +257,7 @@ final class ConnectionManager {
             return
         }
 
+        // Check if another connection is actively using this port
         if let conflict = config.connections.first(where: {
             $0.id != connection.id &&
             $0.port == connection.port &&
@@ -265,6 +266,41 @@ final class ConnectionManager {
             setStatus(.error("Port \(connection.port) used by \(conflict.name)"), for: connection.id)
             pendingOperations.remove(connection.id)
             return
+        }
+
+        // Check if another connection has a process that might still be holding this port
+        // (e.g., a failed connection that just exited). Wait for it to fully terminate.
+        let conflictingProcess: (id: String, process: Process)? = stateQueue.sync {
+            for (otherId, otherProcess) in processes {
+                if otherId != connection.id,
+                   let otherConnection = config.connections.first(where: { $0.id == otherId }),
+                   otherConnection.port == connection.port {
+                    return (id: otherId, process: otherProcess)
+                }
+            }
+            return nil
+        }
+
+        if let conflicting = conflictingProcess {
+            logger.info("Waiting for process on port \(connection.port) from \(conflicting.id) to exit")
+            let semaphore = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .utility).async {
+                conflicting.process.waitUntilExit()
+                semaphore.signal()
+            }
+            let result = semaphore.wait(timeout: .now() + terminationTimeoutSeconds)
+            if result == .timedOut {
+                logger.warning("Conflicting process did not exit in time, sending SIGKILL")
+                kill(conflicting.process.processIdentifier, SIGKILL)
+                conflicting.process.waitUntilExit()
+            }
+            // Clean up the conflicting process from our tracking
+            stateQueue.sync {
+                processes.removeValue(forKey: conflicting.id)
+                cleanupPipeUnsafe(for: conflicting.id)
+            }
+            // Small delay to ensure OS releases the port
+            Thread.sleep(forTimeInterval: 0.1)
         }
 
         // Check port availability with retry logic to handle brief unavailability
