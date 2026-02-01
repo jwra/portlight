@@ -8,6 +8,7 @@ struct MenuBarView: View {
     @State private var isReloading = false
     @State private var reloadComplete = false
     @State private var showFullErrorMessage = false
+    @FocusState private var focusedConnectionIndex: Int?
 
     private var validationResult: ConfigValidationResult? {
         manager.configManager.lastValidationResult
@@ -132,7 +133,7 @@ struct MenuBarView: View {
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(manager.config.connections) { connection in
+                    ForEach(Array(manager.config.connections.enumerated()), id: \.element.id) { index, connection in
                         let connectionIssues = validationResult?.issues(for: connection.id) ?? []
                         ConnectionRowView(
                             connection: connection,
@@ -141,11 +142,51 @@ struct MenuBarView: View {
                             isOperationPending: manager.isOperationPending(for: connection.id),
                             onToggle: { manager.toggle(connection) }
                         )
+                        .focused($focusedConnectionIndex, equals: index)
+                        .accessibilityLabel("\(connection.name), \(manager.status(for: connection).accessibilityLabel)")
                     }
                 }
             }
             .frame(maxHeight: 350)
+            .onKeyPress(.upArrow) {
+                navigateConnection(direction: -1)
+                return .handled
+            }
+            .onKeyPress(.downArrow) {
+                navigateConnection(direction: 1)
+                return .handled
+            }
+            .onKeyPress(.return) {
+                toggleFocusedConnection()
+                return .handled
+            }
+            .onKeyPress(.space) {
+                toggleFocusedConnection()
+                return .handled
+            }
         }
+    }
+
+    private func navigateConnection(direction: Int) {
+        let connections = manager.config.connections
+        guard !connections.isEmpty else { return }
+
+        if let current = focusedConnectionIndex {
+            let newIndex = current + direction
+            if newIndex >= 0 && newIndex < connections.count {
+                focusedConnectionIndex = newIndex
+            }
+        } else {
+            // No selection, start from first (down) or last (up)
+            focusedConnectionIndex = direction > 0 ? 0 : connections.count - 1
+        }
+    }
+
+    private func toggleFocusedConnection() {
+        guard let index = focusedConnectionIndex,
+              index < manager.config.connections.count else { return }
+        let connection = manager.config.connections[index]
+        manager.toggle(connection)
     }
 
     private var actions: some View {
