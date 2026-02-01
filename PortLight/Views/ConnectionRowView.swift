@@ -4,12 +4,17 @@ struct ConnectionRowView: View {
     let connection: DBConnection
     let status: ConnectionStatus
     let validationIssues: [ValidationIssue]
+    let isOperationPending: Bool
     let onToggle: () -> Void
 
     @State private var isHovering = false
 
     private var hasValidationErrors: Bool {
         validationIssues.contains { $0.isError }
+    }
+
+    private var isDisabled: Bool {
+        hasValidationErrors || isOperationPending
     }
 
     private var hasValidationWarnings: Bool {
@@ -68,8 +73,8 @@ struct ConnectionRowView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .disabled(hasValidationErrors)
-        .opacity(hasValidationErrors ? 0.6 : 1.0)
+        .disabled(isDisabled)
+        .opacity(isDisabled ? 0.6 : 1.0)
         .onHover { hovering in
             isHovering = hovering
         }
