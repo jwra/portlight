@@ -16,6 +16,12 @@ final class ConfigManager {
     /// Last validation result from config loading - publicly readable for UI
     var lastValidationResult: ConfigValidationResult?
 
+    /// Last save error - publicly readable for UI to show alert
+    var lastSaveError: String?
+
+    /// Set when stored config data is corrupted and couldn't be loaded
+    var configCorrupted: Bool = false
+
     /// Callback fired when config changes (connections or binaryPath) for ConnectionManager to observe
     var onConfigChanged: (() -> Void)?
 
@@ -24,12 +30,16 @@ final class ConfigManager {
     var connections: [DBConnection] {
         get {
             guard let data = UserDefaults.standard.data(forKey: connectionsKey) else {
+                configCorrupted = false
                 return []
             }
             do {
-                return try JSONDecoder().decode([DBConnection].self, from: data)
+                let result = try JSONDecoder().decode([DBConnection].self, from: data)
+                configCorrupted = false
+                return result
             } catch {
                 logger.error("Failed to decode connections: \(error.localizedDescription)")
+                configCorrupted = true
                 return []
             }
         }
@@ -38,10 +48,13 @@ final class ConfigManager {
                 let data = try JSONEncoder().encode(newValue)
                 UserDefaults.standard.set(data, forKey: connectionsKey)
                 logger.info("Saved \(newValue.count) connections")
+                lastSaveError = nil
+                configCorrupted = false
                 revalidate()
                 onConfigChanged?()
             } catch {
                 logger.error("Failed to encode connections: \(error.localizedDescription)")
+                lastSaveError = "Failed to save connections: \(error.localizedDescription)"
             }
         }
     }
@@ -97,6 +110,16 @@ final class ConfigManager {
 
     func connection(byId id: String) -> DBConnection? {
         connections.first { $0.id == id }
+    }
+
+    /// Clears the last save error
+    func clearSaveError() {
+        lastSaveError = nil
+    }
+
+    /// Clears the corrupted config warning (user acknowledged)
+    func clearCorruptedWarning() {
+        configCorrupted = false
     }
 
     // MARK: - Validation

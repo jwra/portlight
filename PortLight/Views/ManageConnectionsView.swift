@@ -57,6 +57,32 @@ struct ManageConnectionsView: View {
         } message: {
             Text("The selected file is not executable. Please select a valid cloud-sql-proxy binary.")
         }
+        .alert(
+            "Save Failed",
+            isPresented: Binding(
+                get: { configManager.lastSaveError != nil },
+                set: { if !$0 { configManager.clearSaveError() } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                configManager.clearSaveError()
+            }
+        } message: {
+            Text(configManager.lastSaveError ?? "Failed to save configuration changes.")
+        }
+        .alert(
+            "Configuration Data Corrupted",
+            isPresented: Binding(
+                get: { configManager.configCorrupted },
+                set: { if !$0 { configManager.clearCorruptedWarning() } }
+            )
+        ) {
+            Button("OK", role: .cancel) {
+                configManager.clearCorruptedWarning()
+            }
+        } message: {
+            Text("Your saved connections could not be loaded due to data corruption. You may need to re-add your connections.")
+        }
     }
 
     private var header: some View {
